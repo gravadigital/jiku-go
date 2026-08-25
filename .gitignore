@@ -1,0 +1,29 @@
+# Credentials. NOTHING in here is ever committed.
+#
+# The sentinel creds grants no permissions on its own (its JWT denies pub and sub on `>`), but
+# it is still a credential file, and a Zitadel service-account key is a private key. Neither
+# belongs in a repo that is meant to become public.
+# .local/ is the one place local credentials go. Keeping them in a single ignored directory
+# beats scattering per-pattern rules and hoping every future file matches one.
+.local/
+*.creds
+*.creds.local
+tokens.json
+.tokens.json
+*-su.json
+*.pem
+*.key
+
+# Build output
+/bin/
+/dist/
+
+# Go
+*.test
+*.out
+coverage.*
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,116 @@
+name: Release
+
+# Publishing is deliberate: a tag, pushed on purpose, is the only thing that cuts a release.
+# Merging to main does not, so a version number is never spent because somebody merged a pull
+# request.
+#
+#   git tag -a v1.0.0 -m "v1.0.0" && git push origin v1.0.0
+#
+# # WHAT THIS WORKFLOW DOES AND DOES NOT PUBLISH
+#
+# For a Go module the TAG IS THE RELEASE. There is no registry to push to: the first time anyone
+# asks for this version, proxy.golang.org fetches the tag and caches it. That happens with or
+# without this workflow.
+#
+# So what runs here is (a) the gate, against exactly the commit being shipped, and (b) prebuilt
+# binaries for people who want the CLI without a Go toolchain. The library half needs neither.
+#
+# THE CONSEQUENCE WORTH KNOWING: a published tag cannot be corrected. Deleting it from GitHub
+# does not help, because the proxy keeps serving what it already cached. A bad release is fixed
+# by publishing the next patch version, and pulled back with a `retract` directive in go.mod.
+# Never move or reuse a tag.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  # `contents: write` is needed to create the GitHub release. Everything else stays default-deny.
+  contents: write
+
+jobs:
+  release:
+    name: gate and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # Full history, so `git describe` in the Makefile can name the version being built.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@41dfa10bad2bb2ae585af6ee5bb4d7d973ad74ed # v5.1.0
+        with:
+          go-version: stable
+          cache: true
+
+      # A tag must not publish something unverified. CI already ran on main, but a tag can point
+      # at any commit, so the gate runs again here against exactly what is being shipped.
+      - name: make ci
+        run: make ci
+
+      # The tag is what consumers resolve, so a tag that does not match the module's own idea of
+      # its version is worth catching before anyone imports it.
+      - name: Check the tag is a semver release tag
+        run: |
+          case "${GITHUB_REF_NAME}" in
+            v[0-9]*.[0-9]*.[0-9]*|v[0-9]*.[0-9]*.[0-9]*-*) ;;
+            *) echo "::error::${GITHUB_REF_NAME} is not a vMAJOR.MINOR.PATCH tag"; exit 1 ;;
+          esac
+          # A major above v1 needs the module path to carry a /vN suffix, or `go get` resolves
+          # the tag to nothing and the failure lands on whoever tries to import it.
+          major="${GITHUB_REF_NAME%%.*}"; major="${major#v}"
+          want="github.com/gravadigital/jiku-go"
+          if [ "$major" -ge 2 ]; then want="$want/v$major"; fi
+          got=$(go list -m)
+          if [ "$got" != "$want" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} needs module path $want, but go.mod says $got"
+            exit 1
+          fi
+          echo "module path $got matches ${GITHUB_REF_NAME}"
+
+      - name: make dist
+        run: make dist
+
+      # Proves the shipped binary runs and knows which version it is. Without this, a bad
+      # ldflags change is discovered by whoever downloads it first.
+      - name: Smoke-test the built binary
+        run: |
+          got=$(./dist/jiku-linux-amd64 --version)
+          echo "$got"
+          case "$got" in
+            *"${GITHUB_REF_NAME}"*) echo "version matches the tag" ;;
+            *) echo "::error::the binary reports '$got', which does not carry ${GITHUB_REF_NAME}"; exit 1 ;;
+          esac
+
+      - name: Create the GitHub release
+        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.0.8
+        with:
+          files: |
+            dist/*
+          generate_release_notes: true
+          # A tag carrying a hyphen is a prerelease by semver (v1.1.0-rc.1), and marking it as
+          # such keeps it out of "latest release" for anyone browsing the repo. Go already
+          # excludes prereleases from `@latest` on its own.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          body: |
+            ## Install
+
+            ```bash
+            # CLI
+            go install github.com/gravadigital/jiku-go/cmd/jiku@${{ github.ref_name }}
+
+            # Library
+            go get github.com/gravadigital/jiku-go@${{ github.ref_name }}
+            ```
+
+            Or download a binary below and put it on your `PATH`. Verify it against
+            `SHA256SUMS.txt`:
+
+            ```bash
+            sha256sum -c SHA256SUMS.txt --ignore-missing
+            ```
+
+            See [CHANGELOG.md](https://github.com/gravadigital/jiku-go/blob/${{ github.ref_name }}/CHANGELOG.md)
+            for what changed, and the [compatibility policy](https://github.com/gravadigital/jiku-go/blob/${{ github.ref_name }}/README.md#compatibility)
+            for what this version number promises.
