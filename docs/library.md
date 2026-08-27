@@ -222,13 +222,13 @@ json.Unmarshal(data, &created)
 
 The id goes **in the method**: `client.Command(ctx, "requirements.12.edit", payload)`.
 
-Most commands need the acting person in the body (`creator`, `author`, `editor`), because the
-subject identifies the *service*, not the human behind it.
+Most commands accept the acting person in the body (`creator`, `author`, `editor`); several are
+now optional, since core resolves them from the caller when absent (REQ-007).
 
-**Whether your identity may write here at all is the deployment's call**, decided by two
-independent layers that refuse differently — see
-[Who can do what](../README.md#who-can-do-what). Product roles have conventionally been granted
-reads only. Branch on it rather than assuming:
+**Whether your identity may run a given command is the deployment's call**, decided per role AND
+per command by two independent layers that refuse differently — a role that publishes some
+commands directly can still be refused a specific one, reachable only through the api's `actor`
+envelope. See [Who can do what](../README.md#who-can-do-what). Branch on it rather than assuming:
 
 ```go
 _, err := client.Command(ctx, "clients.new", payload)

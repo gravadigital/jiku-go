@@ -36,6 +36,7 @@ so `make tag` refuses the mistakes that cannot be undone.
 /auth/            token sources: the device flow and service users
 /cmd/jiku/         the CLI, a thin shell over the library
 /docs/            protocol, auth, library and command-reference guides
+/tools/gendocs/   regenerates docs/commands.md from Jiku's own contract — never hand-edit it
 /examples/        runnable programs
 /testdata/        real server replies, used as fixtures
 /.local/          git-ignored; where local credentials go
@@ -66,7 +67,12 @@ This has already happened once: `userId` was rejected on the command plane, wher
 and the ADRs stay in Jiku's own repository. They carry internal identifiers, real configuration
 names and reasoning about trust boundaries, and this repository is published. What a consumer
 needs is derived and written for them: `meta.describe` at runtime for reads, `docs/commands.md`
-for writes.
+for writes — regenerated with `make docs JIKU_APIS=/path/to/jiku/docs/apis` (see
+`tools/gendocs`), never hand-edited. Run it whenever Jiku's command contract changes and commit
+the diff, the same as any other generated file. `docs/commands.md` has already drifted from a
+hand-maintained copy twice — once for a role that had been deleted, once for fields that went
+from required to optional under REQ-007 — which is what made this worth generating instead of
+writing by hand a second time.
 
 **Do not hardcode what the server owns.** Resource names, field names, enum values, page limits
 and which role authorises what are the deployment's, and they change with a deploy. Fetch them

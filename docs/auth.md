@@ -310,51 +310,81 @@ produce an identical `caller_not_authorized`:
 
 ---
 
-## In flight: people writing over the bus (REQ-007)
+## People writing over the bus (REQ-007)
 
-Everything above describes the bus as deployed. One designed change alters what a client can do
-with it, and it is worth knowing about before you build against the current shape.
+**`admin` and `user` publish commands directly, since REQ-007.** The person template split in
+two — `person-internal.yaml` (queries **and** commands) and `person-external.yaml` (queries
+only) — and `rules.yaml` points `admin` and `user` at the first. Core's role map stopped refusing
+those two roles and now enumerates what each may run, still deny-by-default. This was designed
+and is now live; it was verified against a running deployment while this document was written.
 
-**`admin` and `user` are getting the command plane.** The person template splits in two —
-`person-internal.yaml` (queries **and** commands) and `person-external.yaml` (queries only) — and
-`rules.yaml` repoints `admin` and `user` at the first. **`external-user` does not get commands**
-and keeps writing through the portal over HTTP. Core's role map stops refusing those two roles and
-starts enumerating what each may run, still deny-by-default.
+**The guarantee moved rather than disappeared.** Before REQ-007 a person was stopped by the
+transport: the bus refused the publish. Now the publish is allowed and **core** decides, because
+the write rules that used to live in the api moved into core — the worked-hours window, who may
+charge hours to whom, the frozen past weeks of assignment, the requirement state workflow. Core is
+the *only* validation point; the api authenticates the token, publishes, and maps the reply's code
+to HTTP, and nothing else.
 
-**The guarantee moves rather than disappears.** Today a person is stopped by the transport: the
-bus refuses the publish. Afterwards the publish is allowed and **core** decides, because the write
-rules move out of the api and into core — the worked-hours window, who may charge hours to whom,
-the frozen past weeks of assignment, the requirement state workflow. Core becomes the *only*
-validation point; the api keeps authenticating the token, publishing, and mapping the reply's code
-to HTTP.
+What that changed for a client, concretely:
 
-What that changes for a client, concretely:
-
-| | Now | After |
+| | Before REQ-007 | Now |
 |---|---|---|
 | a person's refused write | `Permissions Violation` from the bus, at publish | a `failure` envelope from core |
 | where to look | your role's template | core's role map, project permissions, business rules |
 | this library's path | `permissionError` | `*Error` with a code |
 
-Both paths already work here, so nothing needs changing to keep up — but code that branches on
-one of them should branch on the other too. `errors.Is(err, jiku.ErrFailure)` versus "any other
-error" is the distinction that survives.
+Both paths still exist in this client — a role that is not granted the command prefix at all
+still gets `permissionError`; a role that is granted it but fails core's checks gets a `failure`
+envelope. Code branching on writes should handle both:
+`errors.Is(err, jiku.ErrFailure)` versus "any other error" is the distinction that survives.
 
-**Expect new error codes.** Rules moving into core arrive with their own codes, and
-`access_denied` is added for the project-permission refusal. The catalog in this package is not
-closed and must not be switched on exhaustively — see the note under the constants.
+**Not every role reaches every command the same way.** Core's map has THREE tiers per role, not
+one, and the difference is a real security boundary — confirmed by reading the deployed role map
+directly:
 
-**Do not send `actor`.** The change adds a reserved top-level `actor` envelope carrying the acting
-person's `sub` and roles, extracted by the dispatcher before validation. **Only the api's own
-service user may carry it**; anybody else gets `invalid_fields`, deliberately the same code the
-read plane uses for identity fields, because it is the same rule on the other side. This client
-refuses it locally on the command plane for that reason. Domain fields naming a person —
-`creator`, `editor`, `author`, `uploader`, `personId`, `userId` — are unaffected and stay.
+```
+internal-app    commands: ALL                                          (all 21, direct)
+admin           commands: ADMIN_COMMANDS = INTERNAL_COMMANDS + 1        (20 direct, +1 admin-only)
+user            commands: INTERNAL_COMMANDS
+                envelopeCommands: USER_ENVELOPE_COMMANDS = + 1 more     (1 more, ONLY via envelope)
+external-user   commands: []
+                envelopeCommands: EXTERNAL_ENVELOPE_COMMANDS = 6        (6, ONLY via envelope)
+```
 
-**Two smaller consequences.** A 21st command appears (`week-assigned-times.replace`), and the api's
-`401 user_not_found` disappears: core creates the caller's `users` row from the command itself, so
-an authenticated identity works without a pre-existing row. That removes the missing-row failure
-described above for anyone who executes a command.
+- **`commands`** — reachable by publishing straight to the bus, exactly like any command in this
+  client's `docs/commands.md`.
+- **`envelopeCommands`** — reachable *only* as a side effect of the api acting on the person's
+  behalf, carrying the reserved `actor` envelope. **Publishing one of these directly is refused**,
+  even though the role can technically publish other commands: `week-assigned-times.replace` is
+  `admin`-only (C-38) and simply is not in `user`'s list at all; `requirements.subscriptors.new`
+  is in `user`'s `envelopeCommands` but not its `commands`, so a `user` reaches it only by going
+  through the api's requirement-creation flow, never by publishing it to the bus themselves.
+- **`external-user` never gets direct commands.** Its bus template still grants no command-prefix
+  publish, matching `commands: []` in core's map. What changed for this role is nothing: it
+  reaches the same six commands it always did, only through the api, exactly as before REQ-007.
+
+`jiku whoami` reports this distinction per role rather than asserting one answer for "a product
+role"; `jiku doctor` reports what your identity actually reaches when the two disagree.
+
+**Expect new error codes.** Rules that moved into core arrived with their own codes:
+`access_denied` (project permissions), `invalid_date_range` (the hours window and week
+validation), `invalid_state_transition` and `stage_not_found` (the requirement state workflow).
+The catalog in this package is not closed and must not be switched on exhaustively — see the note
+under the constants.
+
+**Do not send `actor`.** The reserved top-level envelope carries the acting person's `sub` and
+roles, extracted by the dispatcher before validation. **Only the api's own service user may carry
+it**; anybody else gets `invalid_fields`, deliberately the same code the read plane uses for
+identity fields, because it is the same rule on the other side. This client refuses it locally on
+the command plane for that reason. Domain fields naming a person — `creator`, `editor`, `author`,
+`uploader`, `personId`, `userId` — are unaffected, and several of them are now OPTIONAL: core
+resolves the actor from the caller when they are absent, confirmed by sending
+`worked-times.new` and `requirements.new` with no acting-person field at all.
+
+**Two smaller consequences.** A 21st command exists (`week-assigned-times.replace`, `admin` only),
+and the api's `401 user_not_found` is gone: core creates the caller's `users` row from the command
+itself, so an authenticated identity works without a pre-existing row. That removes the
+missing-row failure described above for anyone who executes a command.
 
 ---
 

@@ -157,9 +157,9 @@ cat task.json | jiku cmd tasks.new -
 
 An id goes **in the method**, not in the payload: `requirements.12.edit`.
 
-Whether your identity may write over the bus is the deployment's call — see
-[Who can do what](#who-can-do-what). Product roles have conventionally been granted reads only,
-and that is [changing](docs/auth.md#in-flight-people-writing-over-the-bus-req-007).
+Whether your identity may write over the bus is the deployment's call, and it is not the same
+answer for every command within a role — see [Who can do what](#who-can-do-what) and
+[docs/auth.md](docs/auth.md#people-writing-over-the-bus-req-007).
 
 ### Output
 
@@ -411,27 +411,27 @@ Typical policy at the time of writing:
 
 | Role | Queries | Commands |
 |---|---|---|
-| `admin`, `user`, `external-user` (people) | all 23 | none |
-| `internal-app` (the api) | all | all |
+| `admin` | all 23 | 20 direct, +1 admin-only direct (21 total) |
+| `user` | all 23 | 20 direct, +1 more only via the api's `actor` envelope |
+| `external-user` | all 23 | 0 direct, 6 only via the api's `actor` envelope |
+| `internal-app` (the api) | all | all 21, direct |
 | `core`, `bus-observer` | none | none |
 
-**The reads are contractual; the writes are policy.** Jiku's own command contract states that the three
-product roles get *every query*, so that row is stable. Everything else in that table is a
-deployment's choice and moves with a deploy — this client asserts none of it.
+**The reads are contractual; the writes are policy, at two levels within a role, not one.**
+Jiku's own command contract states the three product roles get *every query*, so that row is
+stable. The command columns are deployment policy and move with a deploy — this client asserts
+none of it — but the SHAPE of the split is worth knowing: reaching a command "only via the
+envelope" means the api can do it on your behalf and you cannot do it yourself by publishing
+directly. `week-assigned-times.replace` is `admin`-only for exactly this reason (C-38): giving
+`user` direct access to it would let any user assign any week, which the portal never allowed.
 
-Writes have been withheld from people deliberately, and the reason is not bureaucracy: core does
-not hold the business rules that depend on the end user — the worked-hours window, who may charge
-hours to whom, the frozen past weeks of assignment. Those live in the api, so a person publishing
-`worked-times.new` straight to the bus would bypass three rules with nowhere else to live.
+Since [REQ-007](docs/auth.md#people-writing-over-the-bus-req-007), core is the *only* validation
+point for writes: the worked-hours window, who may charge hours to whom, the frozen past weeks of
+assignment, and the requirement state workflow all run there now, not in the api.
 
-`jiku whoami` shows your roles with what they usually allow. `jiku doctor` stops guessing and
-asks: it reports which of the two layers refused you, which is the question worth answering.
-
-> **This is moving.** `admin` and `user` are being granted the command plane, with the write rules
-> moving out of the api and into core — so a person's refused write will arrive as a `failure`
-> envelope from core rather than as a bus permissions violation. Both paths already work in this
-> client. See [docs/auth.md](docs/auth.md#in-flight-people-writing-over-the-bus-req-007) for what
-> to expect, including the reserved `actor` field you must not send.
+`jiku whoami` reports what your roles usually allow, split by whether a command is reachable
+directly or only through the api. `jiku doctor` stops guessing and asks: it reports which layer
+refused you, which is the question worth answering when a write fails.
 
 ---
 
@@ -526,6 +526,7 @@ help carries the same explanations as these documents.
 /auth/            token sources: the device flow and service users
 /cmd/jiku/         the CLI, a thin shell over the library
 /docs/            protocol, auth, library and command-reference guides
+/tools/gendocs/   regenerates docs/commands.md from Jiku's own contract — never hand-edit it
 /examples/        runnable programs
 /testdata/        real server replies, used as fixtures
 ```

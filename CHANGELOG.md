@@ -7,6 +7,32 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Five error codes that shipped with REQ-007: `CodeInvalidDateRange`, `CodeInvalidStateTransition`,
+  `CodeStageNotFound`, `CodeFileNotAvailable` and `CodeInvalidAttachmentID` (the latter two have no
+  current emitter but are kept, matching Jiku's own catalog, which is not closed).
+- `tools/gendocs`, which regenerates `docs/commands.md` from Jiku's own command contract. Run with
+  `make docs JIKU_APIS=/path/to/jiku/docs/apis`. The source contract is still never vendored —
+  only the generated, consumer-facing Markdown is committed.
+- A regression test pinning the error-code catalog against a snapshot of Jiku's contract, so a
+  future drift fails loudly instead of silently.
+
+### Fixed
+
+- **`docs/commands.md` had drifted from the deployed contract.** `creator`, `editor`, `author` and
+  `personId` were documented as required on nine commands where REQ-007 made them optional (core
+  now resolves the acting identity from the caller when they are absent). The week-assigned-times
+  command (the 21st) was missing entirely. Both are now generated from the contract rather than
+  hand-maintained.
+- **`jiku whoami`, `jiku doctor`'s hints, and the `cmd`/`Command` help text asserted that product
+  roles cannot write over the bus.** That stopped being true when REQ-007 shipped: `admin` and
+  `user` now publish most commands directly, with an additional distinction this client had not
+  modelled — a role's commands split into ones reachable by publishing directly and ones reachable
+  only as a side effect of the api acting on the caller's behalf (the reserved `actor` envelope).
+  `external-user` is unaffected: it still writes only through the api, exactly as before. Verified
+  against a running deployment for all three roles before writing the fix.
+
 ## [1.0.0] - 2026-08-25
 
 First release. A Go client for Jiku's NATS API — 23 read endpoints and 20 write commands — as

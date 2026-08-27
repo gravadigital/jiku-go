@@ -54,6 +54,13 @@ ci: ## fmt check + vet + race tests — the gate CI and the release both run
 	go test -race ./...
 	@echo "ok"
 
+.PHONY: docs
+docs: ## Regenerate docs/commands.md: make docs JIKU_APIS=/path/to/jiku/docs/apis
+	@test -n "$(JIKU_APIS)" || (echo "usage: make docs JIKU_APIS=/path/to/jiku/docs/apis" \
+		&& echo "       (a checkout of Jiku's own repo — that contract is never vendored here," \
+		&& echo "       see CONTRIBUTING.md)" && exit 1)
+	go run ./tools/gendocs -in "$(JIKU_APIS)/core.yaml" -out docs/commands.md
+
 # `check` is kept as an alias because it reads better by hand; `ci` is the name the workflows
 # use, matching nats-zitadel-auth-callout so the gate is called the same thing in both repos.
 .PHONY: check

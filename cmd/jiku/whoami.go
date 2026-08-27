@@ -140,18 +140,29 @@ func planeAccess(roles []string) (queries, commands, note string) {
 	case has("bus-observer"):
 		return "none (subscribe only)", "none",
 			"A local diagnostic role: it listens to everything and publishes nothing."
-	case has("admin"), has("user"), has("external-user"):
-		return "all 23 endpoints", "usually none", "" +
+	case has("admin"), has("user"):
+		return "all 23 endpoints", "most commands", "" +
 			"A product role. Reads over the bus are contractual: Jiku's own contract states that\n" +
-			"these three roles get every query.\n\n" +
-			"Writes have been withheld from them, and by two independent layers — the bus\n" +
-			"template grants no publish on the command prefix, and core's role map authorises no\n" +
-			"command — with writes going through the api, which holds business rules that live\n" +
-			"nowhere else (the worked-hours window, who may charge hours to whom, frozen past\n" +
-			"weeks of assignment).\n\n" +
-			"That is policy rather than a property of this client, and BOTH layers have to agree\n" +
-			"for it to change. `jiku doctor` reports which one is refusing you, which is the\n" +
-			"useful question when a deployment is midway through changing its mind."
+			"these roles get every query.\n\n" +
+			"Writes go DIRECTLY over the bus, since REQ-007: the bus template grants the command\n" +
+			"prefix and core's role map enumerates what each role may run there — `admin` gets one\n" +
+			"command `user` does not (`week-assigned-times.replace`, C-38). Core is the only\n" +
+			"validation point; the business rules that used to live in the api (the worked-hours\n" +
+			"window, who may charge hours to whom, frozen past weeks, the requirement state\n" +
+			"workflow) now run there and refuse with a `failure` envelope, not a bus rejection.\n\n" +
+			"This is deployment policy, not a property of this client, and both the bus template\n" +
+			"and core's map have to agree for a given method to work. `jiku doctor` reports which\n" +
+			"layer is refusing you when one is."
+	case has("external-user"):
+		return "all 23 endpoints", "6 commands, only via the api", "" +
+			"An external-user (the opus portal). Reads over the bus are contractual, same as every\n" +
+			"product role.\n\n" +
+			"Writes are NOT direct: this role's bus template grants no command-prefix publish, and\n" +
+			"core's role map agrees — `commands: []`. What it gets instead is six commands\n" +
+			"reachable only as a side effect of the api acting on its behalf (the reserved `actor`\n" +
+			"envelope), matching exactly what the portal's HTTP surface already allows. Publishing\n" +
+			"one of those six straight to the bus is refused: an external-user has never been able\n" +
+			"to reach them that way, and this did not change that."
 	case len(roles) == 0:
 		return "none", "none", "" +
 			"The token carries no roles claim, so no callout rule can match it and the connection\n" +

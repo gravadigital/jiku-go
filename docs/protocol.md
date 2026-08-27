@@ -253,22 +253,24 @@ jiku-commands.v1.requirements.12.edit
 
 Three asymmetries with the read plane, all deliberate:
 
-**Who may write is policy, enforced in two places.** Product roles have conventionally been
-granted no command — by the bus template *and* by core's role map, independently — with writes
-going through the api over HTTP, because core does not hold the business rules that depend on the
-end user. Both layers have to agree for that to change, and `jiku doctor` reports which one
-refused you. See [Who can do what](../README.md#who-can-do-what).
+**Who may write is policy, and it is enforced per role AND per command, not once per plane.** The
+bus template grants or refuses the whole command prefix for a role; within that, core's role map
+can additionally reserve a command to being run only on the caller's behalf, through the api's
+`actor` envelope — never reachable by publishing it yourself, even for a role that can publish
+other commands directly. `jiku doctor` reports which layer refused a given write. See
+[Who can do what](../README.md#who-can-do-what).
 
 **The acting person travels in the body** — `creator`, `author`, `editor`, `uploader`, and on
 some commands `personId` or `userId` — because the subject identifies the *service* that
-published, and one service user publishes for everybody.
+published, and one service user publishes for everybody. Several of these are now OPTIONAL: core
+resolves the actor from the caller when they are absent (REQ-007).
 
 This is why **the read plane's ban on identity fields does not apply here**: those are domain
 arguments, not a claim about who is calling. `requirements.{id}.subscriptors.new` *requires*
 `userId`. The one name that is reserved on this plane is **`actor`**, the identity envelope only
 the api's own service user may carry; this client refuses it locally, and core answers
 `invalid_fields` to anyone else. See
-[auth.md](auth.md#in-flight-people-writing-over-the-bus-req-007).
+[auth.md](auth.md#people-writing-over-the-bus-req-007).
 
 **Partial edits use three-state semantics.** Absent leaves a field untouched, a value replaces
 it, and `null` clears it — except on a field that is mandatory at creation, where `null` fails.

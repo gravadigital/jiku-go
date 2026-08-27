@@ -347,10 +347,10 @@ func permissionError(c *Client, subject, method string, err error) error {
 			"  reached core at all, so nothing about core's authorisation is implied either way.\n"+
 			"  Your token's role selected a permission template that does not grant %s.\n"+
 			"  Which roles may publish which plane is the deployment's choice, set in the\n"+
-			"  auth-callout's template for your role. Historically the product roles (admin, user,\n"+
-			"  external-user) have been granted the query plane only, with writes going through\n"+
-			"  the api — but that is policy, not a property of this client. `jiku whoami` shows\n"+
-			"  your roles and `jiku doctor` reports what they actually reach.",
+			"  auth-callout's template for your role — not a property of this client, and it can\n"+
+			"  differ per method within a role: `external-user`, for instance, reaches a handful of\n"+
+			"  commands only through the api, never by publishing to this plane directly.\n"+
+			"  `jiku whoami` shows your roles and `jiku doctor` reports what they actually reach.",
 		method, subject, err, plane)
 }
 
@@ -365,10 +365,14 @@ func (c *Client) Query(ctx context.Context, method string, payload any) (json.Ra
 //
 // Three asymmetries, all deliberate on core's side:
 //
-//   - The product roles authorise NO command. A person's token cannot write here, by the bus
-//     template AND by core's role map — two independent layers. Writes go through the api.
+//   - Which caller may run which command is deployment policy, decided per role AND per
+//     command by two independent layers — the bus template and core's role map — and it can
+//     differ WITHIN one role: a role may publish some commands directly and reach others only
+//     as a side effect of the api acting on its behalf (the reserved `actor` envelope,
+//     rejected from anyone else). See docs/commands.md.
 //   - The acting person travels in the BODY (`creator`, `author`, `editor`), because the
-//     subject identifies the SERVICE that published, not the human behind it.
+//     subject identifies the SERVICE that published, not the human behind it. Several of
+//     these fields are optional: core resolves the actor from the caller when absent.
 //   - There is no JetStream and no retry. If core is down the request times out and the
 //     operation did not happen.
 func (c *Client) Command(ctx context.Context, method string, payload any) (json.RawMessage, error) {

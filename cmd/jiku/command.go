@@ -29,19 +29,20 @@ which becomes the subject ...jiku-commands.v1.requirements.12.edit.
 
 WHO MAY RUN THESE
 
-Not a person. The product roles (admin, user, external-user) authorise NO command, enforced
-twice over: the bus template grants no publish on the command prefix, and core's role map
-authorises no command for those roles. Either layer alone would be enough. Run ` + "`jiku whoami`" + `
-to see which side you are on.
-
-Commands are for service identities: the api's own user, and anything else the deployment gives
-a role that core's map grants commands to.
+Deployment policy, decided per role AND per command — not one answer for "a person" or "a
+service". A role can publish some commands straight to the bus while reaching others only as a
+side effect of the api acting on its behalf (the reserved ` + "`actor`" + ` envelope, below), and that
+can differ command by command within one role: ` + "`week-assigned-times.replace`" + ` is admin-only, for
+instance, while most write commands reach further. Run ` + "`jiku whoami`" + ` to see what your roles
+usually allow, and ` + "`jiku doctor`" + ` to see what a specific command actually does.
 
 THE ACTING PERSON GOES IN THE BODY
 
-Most commands require a creator, author, editor or uploader field naming the person acting.
-That is not redundancy with your identity: the subject identifies the SERVICE that published,
-and one service user publishes for everybody.
+Most commands ACCEPT a creator, author, editor or uploader field naming the person acting, and
+several of these are optional: if you omit one, core resolves the actor from your own identity
+(the subject) instead. That is not redundancy with your identity when you DO send one — the
+subject identifies the SERVICE that published, and one service user can publish for many people,
+so the field lets it say who it is acting for.
 
 The read plane's eleven forbidden identity names do NOT apply here, and that is not a detail:
 several commands take an identity as domain data. ` + "`requirements.{id}.subscriptors.new`" + ` requires

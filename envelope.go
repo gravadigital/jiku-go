@@ -159,10 +159,22 @@ const (
 	CodeInvalidResponsiblePerson   = "invalid_responsible_person"
 	CodeRequirementProjectMismatch = "requirement_project_mismatch"
 	CodeResolutionRequired         = "resolution_required"
+	CodeInvalidDateRange           = "invalid_date_range"
+	// CodeInvalidStateTransition is the requirement state workflow refusing a transition
+	// (analisis -> planificacion -> en_cola -> desarrollo -> revision, with incidents
+	// skipping en_cola). Validated wherever the transition happens, not only on resolve.
+	CodeInvalidStateTransition = "invalid_state_transition"
+	CodeStageNotFound          = "stage_not_found"
 	// CodeAccessDenied is the project-permission refusal: the caller may run the method, but
 	// not against this project. Distinct from CodeCallerNotAuthorized, which is about the
 	// method itself.
 	CodeAccessDenied = "access_denied"
+
+	// CodeFileNotAvailable and CodeInvalidAttachmentID are declared for completeness but have
+	// no current emitter — core's own catalog keeps them on purpose, since the catalog is not
+	// closed and nothing yet asks for their removal. Do not assume they are unreachable.
+	CodeFileNotAvailable    = "file_not_available"
+	CodeInvalidAttachmentID = "invalid_attachment_id"
 )
 
 // The catalog above is not closed, and a client must not treat it as such.
