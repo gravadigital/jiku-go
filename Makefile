@@ -54,11 +54,21 @@ ci: ## fmt check + vet + race tests — the gate CI and the release both run
 	go test -race ./...
 	@echo "ok"
 
+# The path to Jiku's repository is ALWAYS a parameter, never a default: it lives somewhere
+# different on every machine, and it is not vendored, submoduled or fetched. JIKU is the repo
+# root; JIKU_APIS (its docs/apis directory) is still accepted, since that is what the previous
+# release documented.
+JIKU_APIS ?= $(if $(JIKU),$(JIKU)/docs/apis,)
+
 .PHONY: docs
-docs: ## Regenerate docs/commands.md: make docs JIKU_APIS=/path/to/jiku/docs/apis
-	@test -n "$(JIKU_APIS)" || (echo "usage: make docs JIKU_APIS=/path/to/jiku/docs/apis" \
-		&& echo "       (a checkout of Jiku's own repo — that contract is never vendored here," \
-		&& echo "       see CONTRIBUTING.md)" && exit 1)
+docs: ## Regenerate docs/commands.md: make docs JIKU=/path/to/jiku
+	@test -n "$(JIKU_APIS)" || (echo "usage: make docs JIKU=/path/to/jiku" \
+		&& echo "       (a checkout of Jiku's own repo, on its \`dev\` branch — that contract" \
+		&& echo "       is never vendored here, see CONTRIBUTING.md and docs/sync-jiku.md)" \
+		&& exit 1)
+	@test -f "$(JIKU_APIS)/core.yaml" || (echo "not found: $(JIKU_APIS)/core.yaml" \
+		&& echo "       JIKU must be the repository ROOT (the directory holding docs/apis)." \
+		&& exit 1)
 	go run ./tools/gendocs -in "$(JIKU_APIS)/core.yaml" -out docs/commands.md
 
 # `check` is kept as an alias because it reads better by hand; `ci` is the name the workflows

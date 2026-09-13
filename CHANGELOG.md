@@ -21,9 +21,19 @@ All notable changes to this project are documented here. The format follows
   only the generated, consumer-facing Markdown is committed.
 - A regression test pinning the error-code catalog against a snapshot of Jiku's contract, so a
   future drift fails loudly instead of silently.
+- **A written procedure for following Jiku's contract**, since that is what most work here is.
+  [CONTRACT.md](CONTRACT.md) pins the commit last verified against — a commit on Jiku's `dev`
+  branch, because its tags are cut from `main` and lag the contract (REQ-012 and the event plane
+  landed after `v1.3.2` with no tag covering them), and the `version:` inside every AsyncAPI file
+  has never moved off `1.0.0`. [docs/sync-jiku.md](docs/sync-jiku.md) is the procedure, and
+  `/sync-jiku` runs it. `CLAUDE.md` orients a session that does not invoke it.
 
 ### Changed
 
+- **`make docs` now takes `JIKU=/path/to/jiku`, the repository root**, and fails with a usage
+  message naming the right directory when given `docs/apis` instead. `JIKU_APIS` still works.
+  The path stays a required parameter — Jiku sits somewhere different on every machine, is not
+  vendored or submoduled, and CI has no access to it by design.
 - **`docs/commands.md` documents 23 write commands, up from 21.** REQ-011 added
   `requirements.{id}.comment.{cid}.edit` and `tasks.{id}.comment.{cid}.edit`, closing the
   asymmetry that let a task's comment be edited but not a requirement's. Both take `comment`

@@ -23,6 +23,14 @@ keeping that way:
 - The inbox-hash test pins values observed from a running auth-callout. That hash must match the
   callout's byte for byte or replies never arrive, so it is pinned rather than recomputed.
 
+## Following Jiku's contract
+
+Most work here starts with a change in Jiku. [CONTRACT.md](CONTRACT.md) records the commit this
+client was last verified against, and [docs/sync-jiku.md](docs/sync-jiku.md) is the procedure for
+moving it forward — what to diff, how to classify a change, and the two failure modes that have
+actually happened: a list transcribed by hand instead of extracted, and prose left asserting a
+rule that a later request retired.
+
 ## Branches and releases
 
 Work happens on `dev`; releases are cut from `main` by pushing a tag. See
@@ -67,8 +75,9 @@ This has already happened once: `userId` was rejected on the command plane, wher
 and the ADRs stay in Jiku's own repository. They carry internal identifiers, real configuration
 names and reasoning about trust boundaries, and this repository is published. What a consumer
 needs is derived and written for them: `meta.describe` at runtime for reads, `docs/commands.md`
-for writes — regenerated with `make docs JIKU_APIS=/path/to/jiku/docs/apis` (see
-`tools/gendocs`), never hand-edited. Run it whenever Jiku's command contract changes and commit
+for writes — regenerated with `make docs JIKU=/path/to/jiku` (see `tools/gendocs`), never
+hand-edited. The path is always a parameter: Jiku sits somewhere different on every machine, and
+CI has no access to it at all. Run it whenever Jiku's command contract changes and commit
 the diff, the same as any other generated file. `docs/commands.md` has already drifted from a
 hand-maintained copy twice — once for a role that had been deleted, once for fields that went
 from required to optional under REQ-007 — which is what made this worth generating instead of

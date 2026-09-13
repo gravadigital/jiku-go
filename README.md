@@ -511,6 +511,8 @@ fails the release rather than publishing a version `go get` cannot resolve.
 | [docs/protocol.md](docs/protocol.md) | subjects, the envelope, error codes, pagination |
 | [docs/library.md](docs/library.md) | the Go API in depth |
 | [docs/commands.md](docs/commands.md) | field reference for the 23 write commands |
+| [docs/sync-jiku.md](docs/sync-jiku.md) | how this client is kept in step with Jiku's contract |
+| [CONTRACT.md](CONTRACT.md) | which commit of Jiku's contract this was last verified against |
 | [CHANGELOG.md](CHANGELOG.md) | what changed in each release |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | the gate, the layout, and the bar for a change |
 | [SECURITY.md](SECURITY.md) | how to report a vulnerability, and where the boundary is |
