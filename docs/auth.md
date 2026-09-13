@@ -321,7 +321,7 @@ and is now live; it was verified against a running deployment while this documen
 **The guarantee moved rather than disappeared.** Before REQ-007 a person was stopped by the
 transport: the bus refused the publish. Now the publish is allowed and **core** decides, because
 the write rules that used to live in the api moved into core — the worked-hours window, who may
-charge hours to whom, the frozen past weeks of assignment, the requirement state workflow. Core is
+charge hours to whom, the frozen past weeks of assignment, the mandatory conclusion. Core is
 the *only* validation point; the api authenticates the token, publishes, and maps the reply's code
 to HTTP, and nothing else.
 
@@ -368,9 +368,18 @@ role"; `jiku doctor` reports what your identity actually reaches when the two di
 
 **Expect new error codes.** Rules that moved into core arrived with their own codes:
 `access_denied` (project permissions), `invalid_date_range` (the hours window and week
-validation), `invalid_state_transition` and `stage_not_found` (the requirement state workflow).
-The catalog in this package is not closed and must not be switched on exhaustively — see the note
-under the constants.
+validation), and `stage_not_found`.
+
+REQ-007 also brought `invalid_state_transition`, and **REQ-012 then took its emitter away**: the
+requirement's state moves freely, forwards or backwards, with no sequence enforced anywhere. The
+code is still in core's catalog and still in this package, with no command that returns it. The
+same request retired the requirement state workflow as a validation point and narrowed
+`resolution_required` back to requirements of type `incidencia` — resolving any other type needs
+neither a resolution type nor a conclusion.
+
+That is the catalog behaving as documented, in the direction people forget: it grows, and it also
+keeps codes that stop being emitted. The catalog in this package is not closed and must not be
+switched on exhaustively — see the note under the constants.
 
 **Do not send `actor`.** The reserved top-level envelope carries the acting person's `sub` and
 roles, extracted by the dispatcher before validation. **Only the api's own service user may carry

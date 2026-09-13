@@ -1,5 +1,5 @@
 // Package jiku is a client for Jiku's API, which is served over NATS rather than HTTP: 23 read
-// endpoints (queries) and 20 write endpoints (commands), request/reply, no REST anywhere.
+// endpoints (queries) and 23 write endpoints (commands), request/reply, no REST anywhere.
 //
 // # Getting started
 //

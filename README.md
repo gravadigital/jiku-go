@@ -1,7 +1,7 @@
 # jiku-go
 
 A Go client for **Jiku's API**, which lives on NATS rather than HTTP: 23 read endpoints
-(*queries*) and 20 write endpoints (*commands*), request/reply, no REST anywhere.
+(*queries*) and 23 write endpoints (*commands*), request/reply, no REST anywhere.
 
 This repo produces two things from the same code:
 
@@ -426,8 +426,10 @@ directly. `week-assigned-times.replace` is `admin`-only for exactly this reason 
 `user` direct access to it would let any user assign any week, which the portal never allowed.
 
 Since [REQ-007](docs/auth.md#people-writing-over-the-bus-req-007), core is the *only* validation
-point for writes: the worked-hours window, who may charge hours to whom, the frozen past weeks of
-assignment, and the requirement state workflow all run there now, not in the api.
+point for writes: the worked-hours window, who may charge hours to whom, and the frozen past weeks
+of assignment all run there now, not in the api. The requirement state workflow was on that list
+until REQ-012 removed it — state transitions are free, in either direction, and no layer validates
+a sequence.
 
 `jiku whoami` reports what your roles usually allow, split by whether a command is reachable
 directly or only through the api. `jiku doctor` stops guessing and asks: it reports which layer
@@ -508,7 +510,7 @@ fails the release rather than publishing a version `go get` cannot resolve.
 | [docs/auth.md](docs/auth.md) | the auth chain, link by link, and every way it breaks |
 | [docs/protocol.md](docs/protocol.md) | subjects, the envelope, error codes, pagination |
 | [docs/library.md](docs/library.md) | the Go API in depth |
-| [docs/commands.md](docs/commands.md) | field reference for the 20 write commands |
+| [docs/commands.md](docs/commands.md) | field reference for the 23 write commands |
 | [CHANGELOG.md](CHANGELOG.md) | what changed in each release |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | the gate, the layout, and the bar for a change |
 | [SECURITY.md](SECURITY.md) | how to report a vulnerability, and where the boundary is |

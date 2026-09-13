@@ -1,4 +1,4 @@
-# The 21 write commands
+# The 23 write commands
 
 A field reference for the command plane, derived from Jiku's own contract with
 `tools/gendocs`. Regenerate rather than hand-edit — see that command's doc comment for how.
@@ -182,6 +182,18 @@ Comment on a requirement.
 
 Error codes: `access_denied`, `file_not_owned`, `internal_error`, `invalid_fields`, `requirement_not_found`
 
+### `requirements.{id}.comment.{cid}.edit`
+
+Edit a comment on a requirement.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `comment` | `string` | **yes** |  |
+| `editor` | `string` | no |  |
+| `fileIds` | `integer[]` | no |  |
+
+Error codes: `access_denied`, `activity_not_editable`, `comment_not_found`, `comment_not_owned`, `file_not_owned`, `internal_error`, `invalid_fields`, `requirement_not_found`
+
 ### `requirements.{id}.edit`
 
 Edit a requirement.
@@ -206,7 +218,7 @@ Edit a requirement.
 | `type` | `string` | no | one of: `funcionalidad`, `mejora`, `incidencia`, `otro`; nullable |
 | `visibilityLevel` | `string` | no | one of: `public`, `internal` |
 
-Error codes: `access_denied`, `file_not_owned`, `internal_error`, `invalid_fields`, `invalid_responsible_person`, `invalid_state_transition`, `requirement_not_found`, `resolution_required`
+Error codes: `access_denied`, `file_not_owned`, `internal_error`, `invalid_fields`, `invalid_responsible_person`, `requirement_not_found`, `resolution_required`
 
 ### `requirements.{id}.resolve`
 
@@ -219,7 +231,7 @@ Resolve a requirement.
 | `conclusion` | `string` | no | nullable |
 | `editor` | `string` | no |  |
 
-Error codes: `access_denied`, `internal_error`, `invalid_fields`, `invalid_state_transition`, `requirement_not_found`, `resolution_required`
+Error codes: `access_denied`, `internal_error`, `invalid_fields`, `requirement_not_found`, `resolution_required`
 
 ### `requirements.{id}.subscriptors.new`
 
@@ -273,6 +285,18 @@ Comment on a task.
 | `visibilityLevel` | `string` | no | one of: `public`, `internal`; default `internal` |
 
 Error codes: `access_denied`, `file_not_owned`, `internal_error`, `invalid_fields`, `objective_not_found`
+
+### `tasks.{id}.comment.{cid}.edit`
+
+Edit a comment on a task.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `comment` | `string` | **yes** |  |
+| `editor` | `string` | no |  |
+| `fileIds` | `integer[]` | no |  |
+
+Error codes: `access_denied`, `activity_not_editable`, `comment_not_found`, `comment_not_owned`, `file_not_owned`, `internal_error`, `invalid_fields`, `objective_not_found`
 
 ### `tasks.{id}.edit`
 

@@ -41,7 +41,7 @@ func newRootCmd() *cobra.Command {
 		Use:     "jiku",
 		Short:   "Command-line client for Jiku's NATS API",
 		Version: version,
-		Long: `jiku talks to Jiku's API over NATS: 23 read endpoints (queries) and 20 write
+		Long: `jiku talks to Jiku's API over NATS: 23 read endpoints (queries) and 23 write
 commands, request/reply, no HTTP anywhere.
 
 Getting started

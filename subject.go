@@ -15,8 +15,10 @@ import (
 const (
 	// ServiceQueries serves the 23 read endpoints. Every product role may publish here.
 	ServiceQueries = "jiku-queries"
-	// ServiceCommands serves the 20 write commands. Product roles may NOT publish here —
-	// see the role table in docs/auth.md.
+	// ServiceCommands serves the 23 write commands. Since REQ-007 `admin` and `user` publish
+	// most of them directly; `external-user` still writes only through the api. Which command
+	// a role reaches, and whether it reaches it directly or only as a side effect of the api
+	// acting on its behalf, is the role table in docs/auth.md.
 	ServiceCommands = "jiku-commands"
 )
 

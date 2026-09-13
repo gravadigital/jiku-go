@@ -9,17 +9,50 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Two error codes from REQ-011**, emitted by the two new comment-editing commands:
+  `CodeCommentNotOwned` (the caller is neither the comment's author nor an `admin`) and
+  `CodeActivityNotEditable` (the activity row exists but is not a comment).
 - Five error codes that shipped with REQ-007: `CodeInvalidDateRange`, `CodeInvalidStateTransition`,
   `CodeStageNotFound`, `CodeFileNotAvailable` and `CodeInvalidAttachmentID` (the latter two have no
-  current emitter but are kept, matching Jiku's own catalog, which is not closed).
+  current emitter but are kept, matching Jiku's own catalog, which is not closed — and
+  `CodeInvalidStateTransition` joined them before this release shipped, see below).
 - `tools/gendocs`, which regenerates `docs/commands.md` from Jiku's own command contract. Run with
   `make docs JIKU_APIS=/path/to/jiku/docs/apis`. The source contract is still never vendored —
   only the generated, consumer-facing Markdown is committed.
 - A regression test pinning the error-code catalog against a snapshot of Jiku's contract, so a
   future drift fails loudly instead of silently.
 
+### Changed
+
+- **`docs/commands.md` documents 23 write commands, up from 21.** REQ-011 added
+  `requirements.{id}.comment.{cid}.edit` and `tasks.{id}.comment.{cid}.edit`, closing the
+  asymmetry that let a task's comment be edited but not a requirement's. Both take `comment`
+  (required), `editor` (optional) and `fileIds`, where `fileIds` is the **complete** set of files
+  that must end up linked — the same `syncFileLinks` semantics as `requirements.{id}.edit`, not an
+  append. `visibilityLevel` is immutable once the comment exists and is rejected with
+  `invalid_fields`. Regenerated with `make docs`; the count is also corrected in the README,
+  `doc.go`, the CLI's help and two doc comments.
+- **`invalid_state_transition` no longer has an emitter (REQ-012).** Requirement state transitions
+  are free in both directions by product decision, so `requirements.{id}.edit` and
+  `.resolve` stopped returning it. The constant stays — core keeps the code in its own catalog and
+  the catalog is not closed — but it is now documented as unreachable, alongside
+  `file_not_available` and `invalid_attachment_id`. The same request narrowed
+  `resolution_required` back to requirements of type `incidencia`; resolving any other type needs
+  neither a resolution type nor a conclusion.
+- The error-catalog regression test now pins the contract's `ErrorCode` enum **whole** and checks
+  **both** directions: a code the contract declares without a constant here, and a constant here
+  the contract does not declare. Previously it only checked the first, so the catalog could only
+  ever grow. Its snapshot also carried a spurious duplicate `worked_time_not_found`, annotated as
+  coming from the contract — the contract lists it once.
+
 ### Fixed
 
+- **`ServiceCommands`' doc comment still said product roles may not publish commands**, the
+  pre-REQ-007 rule the previous release corrected everywhere else. It now points at the role
+  table like the rest.
+- **The requirement state workflow was documented as a live validation rule** in the README and
+  `docs/auth.md`, as one of the rules REQ-007 moved from the api into core. REQ-012 retired it;
+  both now say transitions are free and no layer validates a sequence.
 - **`docs/commands.md` had drifted from the deployed contract.** `creator`, `editor`, `author` and
   `personId` were documented as required on nine commands where REQ-007 made them optional (core
   now resolves the acting identity from the caller when they are absent). The week-assigned-times

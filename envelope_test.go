@@ -265,23 +265,28 @@ func TestCommandActorRejectionExplainsItself(t *testing.T) {
 }
 
 // TestErrorCatalogMatchesJikuCommandContract pins this package's catalog against the exact set
-// of codes Jiku's own command contract declares (docs/apis/core.yaml at the time of writing,
-// captured 2026-08-27 after REQ-007 shipped). This is the regression test for a catalog that
-// went stale twice: it will not catch every future addition — the catalog is deliberately not
-// closed, see the note under the Code constants — but it fails loudly if this snapshot and the
-// package disagree, which is the signal to re-run `make docs` and update both.
+// of codes Jiku's own command contract declares (the `ErrorCode` enum in docs/apis/core.yaml,
+// captured 2026-09-13 after REQ-011 and REQ-012 shipped). This is the regression test for a
+// catalog that went stale twice: it will not catch every future addition — the catalog is
+// deliberately not closed, see the note under the Code constants — but it fails loudly if this
+// snapshot and the package disagree, which is the signal to re-run `make docs` and update both.
+//
+// The snapshot is the enum transcribed whole, so it also pins the codes that currently have NO
+// emitter (`invalid_attachment_id`, `file_not_available`, `invalid_state_transition`). Core
+// keeps those on purpose and so does this package; dropping one here would quietly permit
+// dropping the constant.
 func TestErrorCatalogMatchesJikuCommandContract(t *testing.T) {
 	contract := []string{
-		"access_denied", "already_subscribed", "caller_not_authorized", "client_not_found",
-		"comment_not_found", "daily_limit_exceeded", "file_not_available", "file_not_owned",
-		"file_too_large", "file_type_not_allowed", "internal_error", "invalid_attachment_id",
-		"invalid_cursor", "invalid_date_range", "invalid_fields", "invalid_responsible_person",
+		"access_denied", "activity_not_editable", "already_subscribed", "caller_not_authorized",
+		"client_not_found", "comment_not_found", "comment_not_owned", "daily_limit_exceeded",
+		"file_not_available", "file_not_found", "file_not_owned", "file_too_large",
+		"file_type_not_allowed", "internal_error", "invalid_attachment_id", "invalid_cursor",
+		"invalid_date_range", "invalid_fields", "invalid_responsible_person",
 		"invalid_state_transition", "objective_not_found", "person_not_found",
 		"project_not_found", "query_timeout", "requirement_not_found",
 		"requirement_project_mismatch", "resolution_required", "stage_not_found",
 		"subscription_not_found", "task_not_found", "unknown_caller", "unknown_command",
 		"unworked_time_not_found", "user_not_found", "worked_time_not_found",
-		"worked_time_not_found", // (kept as sent — appears twice in the contract's own list)
 	}
 
 	mine := map[string]bool{
@@ -297,6 +302,7 @@ func TestErrorCatalogMatchesJikuCommandContract(t *testing.T) {
 		CodeResolutionRequired: true, CodeInvalidDateRange: true,
 		CodeInvalidStateTransition: true, CodeStageNotFound: true, CodeAccessDenied: true,
 		CodeFileNotAvailable: true, CodeInvalidAttachmentID: true,
+		CodeCommentNotOwned: true, CodeActivityNotEditable: true,
 	}
 
 	for _, code := range contract {
@@ -304,10 +310,16 @@ func TestErrorCatalogMatchesJikuCommandContract(t *testing.T) {
 			t.Errorf("the contract declares %q, which has no Code constant in this package", code)
 		}
 	}
-	// file_not_found is Jiku's query-plane code (docs/apis/core-queries.yaml), not part of the
-	// command contract snapshot above, so it is checked separately rather than added to
-	// `contract` and risking the two lists silently drifting apart.
-	if CodeFileNotFound != "file_not_found" {
-		t.Error("CodeFileNotFound changed value")
+	// The reverse direction: a constant this package declares that the contract's enum does
+	// not. It catches an invented code as loudly as a missing one — without it, the snapshot
+	// only ever grows.
+	declared := map[string]bool{}
+	for _, code := range contract {
+		declared[code] = true
+	}
+	for code := range mine {
+		if !declared[code] {
+			t.Errorf("this package declares %q, which the contract's ErrorCode enum does not", code)
+		}
 	}
 }

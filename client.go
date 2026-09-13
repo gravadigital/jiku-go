@@ -304,7 +304,7 @@ func requestError(c *Client, subject, method string, err error) error {
 		b.WriteString("\n    - is it on the right plane? queries and commands are separate " +
 			"services\n")
 		fmt.Fprintf(&b, "    - is the instance right? this asked on %q\n", subject)
-		b.WriteString("  `jiku describe` lists the reads core serves; the 20 commands are in " +
+		b.WriteString("  `jiku describe` lists the reads core serves; the 23 commands are in " +
 			"docs/commands.md.")
 		// %w, not %s: a caller must be able to branch on this with errors.Is.
 		return fmt.Errorf("%w: %s", ErrNoEndpoint, b.String())

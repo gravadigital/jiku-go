@@ -158,11 +158,22 @@ const (
 	CodeFileTypeNotAllowed         = "file_type_not_allowed"
 	CodeInvalidResponsiblePerson   = "invalid_responsible_person"
 	CodeRequirementProjectMismatch = "requirement_project_mismatch"
-	CodeResolutionRequired         = "resolution_required"
-	CodeInvalidDateRange           = "invalid_date_range"
-	// CodeInvalidStateTransition is the requirement state workflow refusing a transition
-	// (analisis -> planificacion -> en_cola -> desarrollo -> revision, with incidents
-	// skipping en_cola). Validated wherever the transition happens, not only on resolve.
+	// CodeResolutionRequired is the mandatory conclusion on resolve. REQ-012 narrowed it
+	// back to requirements of type `incidencia`: resolving any other type no longer needs a
+	// resolution type or a conclusion.
+	CodeResolutionRequired = "resolution_required"
+	CodeInvalidDateRange   = "invalid_date_range"
+	// CodeCommentNotOwned and CodeActivityNotEditable are the two codes REQ-011 added with
+	// the comment-editing commands. Only the comment's author or an admin may edit one, and
+	// the entry must actually be a comment — an activity row of any other kind is not
+	// editable even for its own author.
+	CodeCommentNotOwned     = "comment_not_owned"
+	CodeActivityNotEditable = "activity_not_editable"
+	// CodeInvalidStateTransition HAS NO CURRENT EMITTER. It was the requirement state
+	// workflow refusing a transition, until REQ-012 made transitions free by product
+	// decision: `requirements.{id}.edit` and `.resolve` stopped emitting it. Core keeps it in
+	// its own catalog on purpose (the catalog is not closed), so it is kept here too — do not
+	// assume it is unreachable.
 	CodeInvalidStateTransition = "invalid_state_transition"
 	CodeStageNotFound          = "stage_not_found"
 	// CodeAccessDenied is the project-permission refusal: the caller may run the method, but
