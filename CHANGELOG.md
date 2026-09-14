@@ -5,7 +5,7 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) as scoped by the
 [compatibility policy](README.md#compatibility).
 
-## [Unreleased]
+## [1.1.0] - 2026-09-14
 
 ### Added
 
@@ -42,15 +42,6 @@ All notable changes to this project are documented here. The format follows
 - **Two error codes from REQ-011**, emitted by the two new comment-editing commands:
   `CodeCommentNotOwned` (the caller is neither the comment's author nor an `admin`) and
   `CodeActivityNotEditable` (the activity row exists but is not a comment).
-- Five error codes that shipped with REQ-007: `CodeInvalidDateRange`, `CodeInvalidStateTransition`,
-  `CodeStageNotFound`, `CodeFileNotAvailable` and `CodeInvalidAttachmentID` (the latter two have no
-  current emitter but are kept, matching Jiku's own catalog, which is not closed — and
-  `CodeInvalidStateTransition` joined them before this release shipped, see below).
-- `tools/gendocs`, which regenerates `docs/commands.md` from Jiku's own command contract. Run with
-  `make docs JIKU_APIS=/path/to/jiku/docs/apis`. The source contract is still never vendored —
-  only the generated, consumer-facing Markdown is committed.
-- A regression test pinning the error-code catalog against a snapshot of Jiku's contract, so a
-  future drift fails loudly instead of silently.
 - **A written procedure for following Jiku's contract**, since that is what most work here is.
   [CONTRACT.md](CONTRACT.md) pins the commit last verified against — a commit on Jiku's `dev`
   branch, because its tags are cut from `main` and lag the contract (REQ-012 and the event plane
@@ -108,6 +99,24 @@ All notable changes to this project are documented here. The format follows
 - **The requirement state workflow was documented as a live validation rule** in the README and
   `docs/auth.md`, as one of the rules REQ-007 moved from the api into core. REQ-012 retired it;
   both now say transitions are free and no layer validates a sequence.
+## [1.0.1] - 2026-08-27
+
+Catching up with REQ-007, which opened the command plane to people and moved several write
+rules from the api into core.
+
+### Added
+
+- Five error codes that shipped with REQ-007: `CodeInvalidDateRange`, `CodeInvalidStateTransition`,
+  `CodeStageNotFound`, `CodeFileNotAvailable` and `CodeInvalidAttachmentID` (the latter two have no
+  current emitter but are kept, matching Jiku's own catalog, which is not closed — and
+  `CodeInvalidStateTransition` joined them before this release shipped, see below).
+- `tools/gendocs`, which regenerates `docs/commands.md` from Jiku's own command contract. Run with
+  `make docs JIKU_APIS=/path/to/jiku/docs/apis`. The source contract is still never vendored —
+  only the generated, consumer-facing Markdown is committed.
+- A regression test pinning the error-code catalog against a snapshot of Jiku's contract, so a
+  future drift fails loudly instead of silently.
+### Fixed
+
 - **`docs/commands.md` had drifted from the deployed contract.** `creator`, `editor`, `author` and
   `personId` were documented as required on nine commands where REQ-007 made them optional (core
   now resolves the acting identity from the caller when they are absent). The week-assigned-times
@@ -202,5 +211,7 @@ both a library and a CLI.
 - **Release binaries are built with `-trimpath`**, so the same tag builds to the same bytes and no
   build machine's paths ship inside a binary.
 
-[Unreleased]: https://github.com/gravadigital/jiku-go/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/gravadigital/jiku-go/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/gravadigital/jiku-go/compare/v1.0.1...v1.1.0
+[1.0.1]: https://github.com/gravadigital/jiku-go/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/gravadigital/jiku-go/releases/tag/v1.0.0
