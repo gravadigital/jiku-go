@@ -237,8 +237,10 @@ entity:
 
 ### Sharp edges
 
-**`actor.name` can be an id.** The emitter falls back `name` → `email` → `id`, so it is not
-guaranteed to be a human name.
+**`actor.name` is usually a real name, but can be an id.** Core resolves it from the identity's
+row — on the api's channel and on a directly published command alike — so in practice it is the
+person's name. The fallback's last step is the id itself, though, so an identity with no name on
+file yields `name == id`. Compare the two before presenting this as a person.
 
 **A subscriptor's `email` can be null**, and only for a service identity — a Zitadel machine user
 has no address. Skip that recipient rather than treating it as an error.

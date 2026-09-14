@@ -152,9 +152,13 @@ type Event struct {
 type Actor struct {
 	// ID is the Zitadel `sub`, always present.
 	ID string `json:"id"`
-	// Name is present only on the events the catalogue marks as carrying it, and the
-	// emitting side falls back name -> email -> id. SO THIS CAN BE AN ID: do not present it
-	// as a human name without checking it differs from ID.
+	// Name is present only on the events the catalogue marks as carrying it.
+	//
+	// It is normally a real name — core resolves it from the identity's row, on both the
+	// api's channel and a directly published command. But the last step of its fallback
+	// (name -> email -> id) IS THE ID ITSELF, so an identity with no name on file produces a
+	// Name equal to ID. Rare, not impossible: compare against ID before presenting this as
+	// a person, and have something to show when they are equal.
 	Name string `json:"name,omitempty"`
 }
 
