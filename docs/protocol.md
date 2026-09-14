@@ -1,9 +1,14 @@
 # The protocol
 
-Everything on this bus is **request/reply over core NATS**. No JetStream, no queue, no retry, no
-persistence: if core is down, your request times out and the operation did not happen.
+The **query and command planes** — everything on this page — are **request/reply over core
+NATS**. No JetStream, no queue, no retry, no persistence: if core is down, your request times out
+and the operation did not happen.
 
-The authoritative contract lives in Jiku's own repository, as two AsyncAPI documents. Where the
+There is a third plane where none of that holds. Core also **publishes** 16 domain events over
+JetStream, fire-and-forget, at-least-once, with 7 days of retention. It is a different transport
+with different guarantees, and it has its own page: [events.md](events.md).
+
+The authoritative contract lives in Jiku's own repository, as three AsyncAPI documents. Where the
 server and this page disagree, the server is right — and for the read plane you can ask it
 directly: `meta.describe` returns the whole contract as data, which is what `jiku describe`
 prints. The write plane has no such endpoint, so its field reference is

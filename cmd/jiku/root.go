@@ -82,6 +82,7 @@ Everything here is also a Go library:
 		newDescribeCmd(),
 		newQueryCmd(),
 		newCommandCmd(),
+		newEventsCmd(),
 		newRawCmd(),
 		newConfigCmd(),
 	)

@@ -1,6 +1,10 @@
 // Package jiku is a client for Jiku's API, which is served over NATS rather than HTTP: 23 read
 // endpoints (queries) and 23 write endpoints (commands), request/reply, no REST anywhere.
 //
+// Core also PUBLISHES 16 domain events, over JetStream rather than core NATS and with entirely
+// different delivery guarantees. That plane lives in the events subpackage, which is opt-in:
+// importing this one costs nothing to a caller that never consumes events.
+//
 // # Getting started
 //
 //	src, err := auth.NewServiceUser(auth.ServiceUserConfig{

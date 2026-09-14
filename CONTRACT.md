@@ -16,7 +16,7 @@ this file is only its bookmark.
 | **Branch** | `dev` |
 | **Subject** | `Merge pull request #1 from gravadigital/feat/events_emit` |
 | **Authored** | 2026-09-11 |
-| **Verified** | 2026-09-13 |
+| **Verified** | 2026-09-14 |
 
 The commit is on Jiku's `dev` branch, which is where the contract actually changes. Jiku's tags
 are cut from `main` and lag it — REQ-012 and the whole event plane landed after `v1.3.2` with no
@@ -29,7 +29,7 @@ number.
 |---|---|
 | `docs/apis/core.yaml` — 23 write commands | **applied** |
 | `docs/apis/core-queries.yaml` — 23 read endpoints | **applied** |
-| `docs/apis/core-events.yaml` — 16 domain events | **NOT IMPLEMENTED** — see below |
+| `docs/apis/core-events.yaml` — 16 domain events | **applied** — the `events` package |
 
 `docs/apis/api.yaml` is the HTTP api's own contract. This client does not speak HTTP and never
 reads it.
@@ -46,16 +46,28 @@ catalog:
 - **REQ-012** — requirement state transitions are free, which left `invalid_state_transition`
   with no emitter, and narrowed `resolution_required` to `incidencia`.
 
-### Known gap: the event plane (REQ-014)
+### The event plane (REQ-014)
 
-`core-events.yaml` declares 16 domain events that core publishes over NATS/JetStream (stream
-`JIKU_EVENTS`, subjects `{instance}.events.v1.{entity}.{action}`, `limits` retention, 7 days).
-The emitters are implemented and merged in Jiku as of the pinned commit.
+The 16 domain events are consumed by the `events` subpackage and by `jiku events tail`. See
+[docs/events.md](docs/events.md).
 
-**This client does not consume them.** It is request/reply only, and `docs/protocol.md` still
-opens by saying so. Supporting events is new exported API surface, not a catch-up fix, so it is
-deliberately out of scope until designed — see `docs/sync-jiku.md` on why scope changes are not
-folded into a sync.
+Two things about that plane are NOT this client's to fix, and both are deployment work:
+
+**`person-internal.yaml` grants no event permissions.** The template behind `admin` and `user`
+has neither `sub.allow` on `{instance}.events.v1.>` nor the `$JS.API` publish subjects, so those
+roles cannot consume the stream as deployed today. The client reports this precisely — the
+failure is otherwise a silent nothing — but the fix is two blocks in Jiku's template.
+
+**`connector.yaml` grants `$JS.API.>`.** That is the whole JetStream admin api: stream delete,
+purge, retention changes, consumer deletion. A connector built from that template can destroy
+the stream it reads. Consuming needs only the four narrow subjects `docs/events.md` lists.
+
+### Still out of scope
+
+**Batch 3** — `project.created`, `project.updated`, `client.created`, `client.updated`,
+`attachment.linked`, `attachment.unlinked`. REQ-014 declares these "when a connector asks for
+them" and `core-events.yaml` deliberately excludes them from its `EventType` enum, so core does
+not emit them. Nothing to do here until they appear in the contract.
 
 ## Updating this file
 

@@ -9,6 +9,31 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **The event plane (REQ-014).** Core publishes 16 domain events over JetStream; this client can
+  now consume them.
+  - **`events` package**, a subpackage rather than the root: importing `jiku` costs nothing to a
+    caller that never consumes events, and this plane's API can settle without the root's
+    compatibility promise. `New`, `Subscribe`, `SubscribeRaw`, `Event` with typed
+    `RequirementSnapshot`/`TaskSnapshot`, the 16 `Type*` constants, and filter helpers.
+  - It runs on an **existing `*jiku.Client`'s connection** — one identity, one connection, both
+    planes. What a role may reach is a permissions question, not an API one.
+  - **No deduplication, deliberately.** Delivery is at-least-once and the contract makes
+    deduplicating by `eventId` the consumer's job. Doing it here would mean an in-memory window
+    that silently fails to survive a restart, or choosing storage for the caller. `Event.EventID`
+    and `Meta.Delivery` are exposed instead.
+  - **`jiku events tail`** — subject filters with `*` and `>`, `--from-start` / `--since`,
+    `--out` to a file, `--durable` to resume, `--limit` and `--timeout`. Output is JSON Lines
+    with the transport's view (`nats`: subject, stream sequence, timestamp, delivery count,
+    pending) kept separate from the payload (`event`, byte-for-byte as it arrived). `-o table`
+    gives one line per event, `-o raw` the payload alone.
+  - **A permissions failure on this plane is otherwise silent** — the violation is asynchronous
+    and lands in the NATS server's log, never as an error from the call, so the symptom is a
+    consumer that receives nothing. It is detected and reported as an error naming the exact
+    template lines to add, scoped to the four narrow `$JS.API` subjects consuming needs rather
+    than `$JS.API.>`, which is the full JetStream admin api (stream delete, purge, retention
+    changes, consumer deletion).
+  - [docs/events.md](docs/events.md) and `examples/events`.
+
 - **Two error codes from REQ-011**, emitted by the two new comment-editing commands:
   `CodeCommentNotOwned` (the caller is neither the comment's author nor an `admin`) and
   `CodeActivityNotEditable` (the activity row exists but is not a comment).
@@ -57,6 +82,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Three documents said this client speaks only request/reply**, which the event plane made
+  false: `docs/protocol.md` opened with "No JetStream", and the README and `doc.go` described the
+  API as request/reply with nothing else. Found by the prose sweep in
+  [docs/sync-jiku.md](docs/sync-jiku.md).
 - **`ServiceCommands`' doc comment still said product roles may not publish commands**, the
   pre-REQ-007 rule the previous release corrected everywhere else. It now points at the role
   table like the rest.

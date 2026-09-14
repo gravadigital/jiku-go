@@ -1,7 +1,8 @@
 # jiku-go
 
 A Go client for **Jiku's API**, which lives on NATS rather than HTTP: 23 read endpoints
-(*queries*) and 23 write endpoints (*commands*), request/reply, no REST anywhere.
+(*queries*) and 23 write endpoints (*commands*), request/reply, no REST anywhere — plus the
+16 domain events core publishes over JetStream (*[events](docs/events.md)*).
 
 This repo produces two things from the same code:
 
@@ -511,6 +512,7 @@ fails the release rather than publishing a version `go get` cannot resolve.
 | [docs/protocol.md](docs/protocol.md) | subjects, the envelope, error codes, pagination |
 | [docs/library.md](docs/library.md) | the Go API in depth |
 | [docs/commands.md](docs/commands.md) | field reference for the 23 write commands |
+| [docs/events.md](docs/events.md) | the domain event stream: permissions, filters, delivery |
 | [docs/sync-jiku.md](docs/sync-jiku.md) | how this client is kept in step with Jiku's contract |
 | [CONTRACT.md](CONTRACT.md) | which commit of Jiku's contract this was last verified against |
 | [CHANGELOG.md](CHANGELOG.md) | what changed in each release |

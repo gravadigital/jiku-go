@@ -42,6 +42,7 @@ so `make tag` refuses the mistakes that cannot be undone.
 ```
 /                 package jiku — the library. Its import path IS the module path.
 /auth/            token sources: the device flow and service users
+/events/          package events — the JetStream domain event plane (opt-in)
 /cmd/jiku/         the CLI, a thin shell over the library
 /docs/            protocol, auth, library and command-reference guides
 /tools/gendocs/   regenerates docs/commands.md from Jiku's own contract — never hand-edit it
