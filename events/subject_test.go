@@ -1,9 +1,13 @@
 package events
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 func TestSubject(t *testing.T) {
@@ -100,10 +104,18 @@ func TestTypeFromSubject(t *testing.T) {
 func TestRequiredPermissionsRecommendsTheNarrowSet(t *testing.T) {
 	msg := RequiredPermissions("dev")
 
+	// The full set, matching Jiku's own connector template. STREAM.INFO is listed first
+	// because it is the one that was missing in a live test: without it the client cannot
+	// resolve the stream, and the failure presents as "stream not found" rather than as a
+	// permissions problem. Dropping any of these from the message sends someone looking in
+	// the wrong place.
 	for _, want := range []string{
-		"$JS.API.INFO",
 		"$JS.API.STREAM.INFO.JIKU_EVENTS",
+		"$JS.API.INFO",
 		"$JS.API.CONSUMER.CREATE.JIKU_EVENTS.>",
+		"$JS.API.CONSUMER.DURABLE.CREATE.JIKU_EVENTS.>",
+		"$JS.API.CONSUMER.INFO.JIKU_EVENTS.>",
+		"$JS.API.CONSUMER.MSG.NEXT.JIKU_EVENTS.>",
 		"dev.events.v1.>",
 	} {
 		if !strings.Contains(msg, want) {
@@ -201,5 +213,27 @@ func TestDeliverPolicy(t *testing.T) {
 	}
 	if ts == nil || !ts.Equal(when) {
 		t.Errorf("start time = %v, want %v", ts, when)
+	}
+}
+
+// "Stream not found" has TWO causes — an absent stream, and a STREAM.INFO request the server
+// dropped for lack of permission — and they need different fixes. The message must not commit
+// to the first, which is what it did until a live test spent its time looking for a stream that
+// was there all along.
+func TestStreamNotFoundMentionsBothCauses(t *testing.T) {
+	c := &Consumer{instance: "dev"}
+	err := c.explain(context.Background(), jetstream.ErrStreamNotFound, make(chan error), "reading the stream")
+	msg := err.Error()
+
+	if !errors.Is(err, ErrNoStream) {
+		t.Error("the error no longer matches ErrNoStream")
+	}
+	if !strings.Contains(msg, "$JS.API.STREAM.INFO.JIKU_EVENTS") {
+		t.Error("the message does not mention the permission that produces this same symptom")
+	}
+	for _, want := range []string{"does not exist", "may not be allowed"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the message never offers the cause %q:\n%s", want, msg)
+		}
 	}
 }

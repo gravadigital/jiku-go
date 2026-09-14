@@ -33,6 +33,11 @@ All notable changes to this project are documented here. The format follows
     than `$JS.API.>`, which is the full JetStream admin api (stream delete, purge, retention
     changes, consumer deletion).
   - [docs/events.md](docs/events.md) and `examples/events`.
+  - **Verified against the `dev` deployment**, not only against the contract: every mode of
+    `jiku events tail` ran against a real bus, and a real `requirement.comment.created` was
+    received and decoded. The payload matched the contract on the two points where it
+    deliberately differs from the read plane — `description` complete rather than truncated, and
+    no `totalMinutes`.
 
 - **Two error codes from REQ-011**, emitted by the two new comment-editing commands:
   `CodeCommentNotOwned` (the caller is neither the comment's author nor an `admin`) and
@@ -82,6 +87,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **"Stream not found" named only one of its two causes.** `nats.go` reports that error both for
+  a stream that does not exist and for a `$JS.API.STREAM.INFO` request the server refused — in
+  the second case the publish is dropped, nothing answers, and the timeout is translated into the
+  same error. The message now offers both and says which to check first. Found the hard way: a
+  missing permission spent a live test masquerading as a missing stream, and sent the user to
+  create a stream that already existed.
+- **The permissions violation could arrive after the error it explains.** The window for it was
+  150ms, but a refused publish only fails once the client's own JetStream timeout expires, well
+  after that. Widened to 2s, which is what makes the two causes above distinguishable at all.
+- **The suggested permission set was missing two subjects** a durable consumer needs
+  (`CONSUMER.DURABLE.CREATE`, `CONSUMER.INFO`). It now matches Jiku's own connector template.
 - **Three documents said this client speaks only request/reply**, which the event plane made
   false: `docs/protocol.md` opened with "No JetStream", and the README and `doc.go` described the
   API as request/reply with nothing else. Found by the prose sweep in

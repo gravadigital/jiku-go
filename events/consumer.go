@@ -310,18 +310,41 @@ func (c *Consumer) watchPermissions(ch chan<- error) func() {
 // explain turns a failure into the most specific error available, preferring a permissions
 // violation when one arrived — it is the cause, and whatever surfaced is the symptom.
 func (c *Consumer) explain(ctx context.Context, err error, permCh <-chan error, op string) error {
-	// A violation may land just after the call fails, so give it the moment it needs
-	// rather than reporting the vaguer error and being wrong.
+	// A violation is asynchronous and can land AFTER the call has already failed, so give
+	// it a moment before reporting the vaguer error and being wrong.
+	//
+	// The wait is generous on purpose. A publish the server refuses is simply dropped: the
+	// client waits out its own JetStream api timeout and only then gives up, and the
+	// violation arrives on the error handler around that point — well after the 150ms an
+	// earlier version of this waited, which is how a missing permission spent a live test
+	// masquerading as a missing stream.
 	select {
 	case permErr := <-permCh:
 		return c.permissionError(permErr, op)
-	case <-time.After(150 * time.Millisecond):
+	case <-time.After(2 * time.Second):
 	case <-ctx.Done():
 	}
 
 	if errors.Is(err, jetstream.ErrStreamNotFound) {
-		return fmt.Errorf("%w: it is created by Jiku's deployment (see docs/events.md), not by this client: %v",
-			ErrNoStream, err)
+		// "Stream not found" is what nats.go reports for BOTH a stream that does not
+		// exist and a STREAM.INFO publish the server refused — in the second case the
+		// request is dropped, nothing answers, and the timeout is translated into this
+		// error. They need different fixes, so the message must not commit to the first.
+		return fmt.Errorf(`%w — or this identity may not be allowed to ask about it.
+
+Two different causes produce this same answer, because a refused request and an absent
+stream both end in silence:
+
+  1. The stream really does not exist on this deployment. It is created by Jiku's
+     deployment (deploy/nats/create-events-stream.sh), never by this client.
+  2. This identity lacks "$JS.API.STREAM.INFO.%s". The server DROPS the request rather
+     than refusing it out loud, so the client times out and reports it as "not found".
+
+Check 2 first: it is the one this client can tell you how to fix.
+
+%s
+
+the bus said: %v`, ErrNoStream, StreamName, RequiredPermissions(c.instance), err)
 	}
 	if _, ok := isPermissionViolation(err); ok {
 		return c.permissionError(err, op)

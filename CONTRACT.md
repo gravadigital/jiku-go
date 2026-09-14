@@ -11,11 +11,11 @@ this file is only its bookmark.
 
 | | |
 |---|---|
-| **Commit** | `9345b50f9f20b793b6e8177573233bca8dd4733d` |
-| **Short** | `9345b50` |
+| **Commit** | `db0232cbfd87d08eb99670dad3e6653b74279ad6` |
+| **Short** | `db0232c` |
 | **Branch** | `dev` |
-| **Subject** | `Merge pull request #1 from gravadigital/feat/events_emit` |
-| **Authored** | 2026-09-11 |
+| **Subject** | `fix(deploy/nats): el conector necesita $JS.API.STREAM.INFO.JIKU_EVENTS` |
+| **Authored** | 2026-09-14 |
 | **Verified** | 2026-09-14 |
 
 The commit is on Jiku's `dev` branch, which is where the contract actually changes. Jiku's tags
@@ -51,16 +51,25 @@ catalog:
 The 16 domain events are consumed by the `events` subpackage and by `jiku events tail`. See
 [docs/events.md](docs/events.md).
 
-Two things about that plane are NOT this client's to fix, and both are deployment work:
+**Verified against the `dev` deployment on 2026-09-14**, not only against the contract: an
+ephemeral tail, a filtered tail, `--from-start`, `--out`, and a durable consumer all ran against
+`hub.jiku.dev.grava.io`, and a real `requirement.comment.created` was received and decoded. The
+payload matched the contract on the two points where it deliberately differs from the read plane
+— `description` complete rather than truncated, and no `totalMinutes`.
+
+One thing about that plane is still deployment work:
 
 **`person-internal.yaml` grants no event permissions.** The template behind `admin` and `user`
 has neither `sub.allow` on `{instance}.events.v1.>` nor the `$JS.API` publish subjects, so those
-roles cannot consume the stream as deployed today. The client reports this precisely — the
-failure is otherwise a silent nothing — but the fix is two blocks in Jiku's template.
+roles cannot consume the stream. `internal-app` can, since `connector.yaml` absorbed `api.yaml`
+in Jiku's `70889d2`. Whether product roles should read events is a product decision, not an
+omission to fix blindly.
 
-**`connector.yaml` grants `$JS.API.>`.** That is the whole JetStream admin api: stream delete,
-purge, retention changes, consumer deletion. A connector built from that template can destroy
-the stream it reads. Consuming needs only the four narrow subjects `docs/events.md` lists.
+Resolved upstream while this was built, and worth recording because the client's error messages
+were written against the older state: Jiku's `70889d2` narrowed `connector.yaml` from
+`$JS.API.>` — the full JetStream admin api — to five scoped subjects, and `db0232c` added
+`$JS.API.STREAM.INFO.JIKU_EVENTS`, which the client needs to resolve the stream before reading
+it.
 
 ### Still out of scope
 

@@ -82,14 +82,18 @@ template — this is the NARROW set, sufficient for an ephemeral consumer:
       - "$JS.API.INFO"
       - "$JS.API.STREAM.INFO.%[2]s"
       - "$JS.API.CONSUMER.CREATE.%[2]s.>"
+      - "$JS.API.CONSUMER.DURABLE.CREATE.%[2]s.>"
+      - "$JS.API.CONSUMER.INFO.%[2]s.>"
       - "$JS.API.CONSUMER.MSG.NEXT.%[2]s.>"
   sub:
     allow:
       - "%[1]s.events.%[3]s.>"
       - "_INBOX.<hash of the user id>.>"
 
-  # for --durable as well:
-  #   - "$JS.API.CONSUMER.DURABLE.CREATE.%[2]s.>"
+STREAM.INFO is the one most often left out, and leaving it out does not look like a
+permissions problem: the client resolves the stream before reading it, the server DROPS that
+request instead of refusing it audibly, and the resulting timeout is reported as "stream not
+found". A stream that plainly exists, reported missing, is this line.
 
 Do NOT use "$JS.API.>" instead. It is the full JetStream admin api — it includes deleting and
 purging the stream, changing its retention, and deleting other consumers.

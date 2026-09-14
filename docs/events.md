@@ -72,14 +72,24 @@ pub:
     - "$JS.API.INFO"
     - "$JS.API.STREAM.INFO.JIKU_EVENTS"
     - "$JS.API.CONSUMER.CREATE.JIKU_EVENTS.>"
+    - "$JS.API.CONSUMER.DURABLE.CREATE.JIKU_EVENTS.>"
+    - "$JS.API.CONSUMER.INFO.JIKU_EVENTS.>"
     - "$JS.API.CONSUMER.MSG.NEXT.JIKU_EVENTS.>"
-    # for a durable consumer as well:
-    # - "$JS.API.CONSUMER.DURABLE.CREATE.JIKU_EVENTS.>"
 sub:
   allow:
     - "{{instance}}.events.v1.>"
     - "_INBOX.{{user_id_hash}}.>"
 ```
+
+### `STREAM.INFO` is the one that gets left out
+
+And leaving it out does not look like a permissions problem. The client resolves the stream
+before reading it; the server **drops** that request rather than refusing it audibly; the client
+times out; and `nats.go` reports the timeout as **"stream not found"**.
+
+So the symptom of this missing line is *a stream that plainly exists being reported as missing* —
+which sends you to check the deployment instead of the template. It cost a live test exactly that
+detour. The error this client prints now offers both causes.
 
 ### Do not grant `$JS.API.>`
 
