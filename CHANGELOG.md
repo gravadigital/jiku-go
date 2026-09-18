@@ -5,6 +5,45 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) as scoped by the
 [compatibility policy](README.md#compatibility).
 
+## [Unreleased]
+
+### Fixed
+
+- **`Iterator` silently truncated a sweep at an empty page that still carried a cursor.** The
+  end of a collection is signalled by the ABSENCE of a cursor and by nothing else, but `fetch`
+  also stopped whenever a page came back with no items. Those are different answers: the byte
+  budget (`max_payload × 0.5`) cuts a page wherever the reply would otherwise exceed what NATS
+  accepts and emits a cursor at the cut, so an empty page with a cursor means "keep going".
+  `Iterate` and `All` ended early on that shape — a short collection, no error, and nothing to
+  distinguish it from a genuinely small one.
+
+  `Next` also walked pages by recursing, which would have turned a server answering "empty,
+  here is a cursor" indefinitely into a stack overflow once empty pages stopped ending the
+  walk. It is a loop now, bounded by the caller's context like every other request here.
+
+- **`auth.MemoryStore` was not safe for concurrent use**, although a `Store` is reached from
+  whatever goroutine asked for a token and nats.go asks from its own on every reconnect. Its
+  `Load` and `Save` are guarded now, which is the in-memory equivalent of the atomic rename
+  `FileStore` already used. The `Tokens` field stays exported and every existing construction
+  still compiles; reach it through `Load`/`Save` rather than directly.
+
+### Added
+
+- **[docs/reference.md](docs/reference.md)** — every exported identifier of the three packages,
+  grouped by what it is for, with each behaviour marked as **Jiku's contract** or as this
+  client's own choice. That distinction is the point: it is what a client in another language
+  has to reproduce versus what it should replace with its own idiom. It ends with a porting
+  checklist. Linked from the README and from `docs/library.md`.
+
+- Tests for `Iterator`, which had none — including the empty-page-with-a-cursor shape above,
+  the misbehaving-server bound, and error propagation — plus the first tests for the CLI's pure
+  decision logic: `planeAccess` (what a role reaches, per plane), `readPayload`, `itemsJSON`
+  and the flag-over-config precedence rule. Each was confirmed to fail against the drift it
+  guards before being kept.
+
+- `docs/library.md` now lists the `events` package, which was missing from its table of the
+  three.
+
 ## [1.1.0] - 2026-09-14
 
 ### Added
