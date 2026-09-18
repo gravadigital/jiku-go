@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -395,3 +398,44 @@ func TestDeviceFlowScopesIncludeOfflineAccess(t *testing.T) {
 }
 
 func testContext() context.Context { return context.Background() }
+
+// TestMemoryStoreConcurrency covers the promise a Store carries by being reachable from a token
+// source: nats.go calls the token handler from its own goroutine on every reconnect, so a
+// refresh that Saves here can run while another goroutine Loads. FileStore keeps that promise
+// with an atomic rename; this one needs a lock, and without it the race detector fires.
+//
+// Worth only what `-race` makes it worth — `make ci` runs the tests under the detector for
+// exactly this class of test.
+func TestMemoryStoreConcurrency(t *testing.T) {
+	store := &MemoryStore{}
+	var wg sync.WaitGroup
+
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if err := store.Save(Tokens{AccessToken: fmt.Sprintf("token-%d", i)}); err != nil {
+				t.Errorf("Save: %v", err)
+			}
+		}(i)
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := store.Load(); err != nil {
+				t.Errorf("Load: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Whichever writer won, the value must be one somebody actually wrote rather than a
+	// half-updated struct.
+	got, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(got.AccessToken, "token-") {
+		t.Errorf("AccessToken = %q, want one of the written values", got.AccessToken)
+	}
+}
