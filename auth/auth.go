@@ -82,6 +82,16 @@ type Tokens struct {
 	// written to a file and read back tomorrow. Without it a stored `expires_in` is
 	// meaningless.
 	ObtainedAt time.Time `json:"obtained_at,omitempty"`
+
+	// CredentialKey names which credential minted this token, for a stored one. It is set
+	// by the service-user flow and empty for the device flow, whose store is already per
+	// instance.
+	//
+	// It exists so a cache can be INVALIDATED rather than trusted: rotate the machine user's
+	// key or change the project id, and the token on disk grants something other than what
+	// the caller now asks for. Presenting it would fail at the auth-callout, three services
+	// from the file that caused it.
+	CredentialKey string `json:"credential_key,omitempty"`
 }
 
 // Expiry is when the access token stops being accepted.

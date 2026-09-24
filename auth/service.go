@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -73,6 +74,17 @@ type ServiceUserConfig struct {
 	AssertionTTL time.Duration
 	// HTTPClient overrides the HTTP client.
 	HTTPClient *http.Client
+	// Store persists the minted access token between runs, which is what makes a
+	// short-lived process — the CLI — stop paying a round trip to Zitadel every time.
+	//
+	// It is OPTIONAL and off by default: a service holding a key needs no stored state, and
+	// writing one where nobody asked for it is a credential on disk that nobody is expecting.
+	// The CLI opts in because it is invoked once per command and pays the mint every time.
+	//
+	// What is stored is an ACCESS token, not a refresh token: it expires on its own and
+	// cannot mint anything. A stored token that no longer matches the key or the scopes it
+	// was minted for is discarded rather than used — see StoreKey.
+	Store Store
 }
 
 // ServiceAccountKey is the JSON key file Zitadel produces for a machine user.
@@ -87,8 +99,11 @@ type ServiceAccountKey struct {
 // ServiceUser is a TokenSource backed by a Zitadel service account key.
 //
 // It caches the access token in memory and mints a new one when the cached one nears expiry,
-// so a long-lived connection that reconnects always presents a live token. Nothing is written
-// to disk: the key is the only durable state, and it is the caller's to manage.
+// so a long-lived connection that reconnects always presents a live token.
+//
+// By default nothing is written to disk: the key is the only durable state, and it is the
+// caller's to manage. A caller that is invoked repeatedly as a short-lived process — the CLI —
+// can set Store to keep the minted token across runs and skip the round trip to Zitadel.
 type ServiceUser struct {
 	cfg  ServiceUserConfig
 	key  ServiceAccountKey
@@ -146,7 +161,24 @@ func NewServiceUser(cfg ServiceUserConfig) (*ServiceUser, error) {
 // available without a network call, straight from the key file.
 func (s *ServiceUser) UserID() string { return s.key.UserID }
 
+// StoreKey identifies which credential a stored token belongs to.
+//
+// A token is only reusable for the exact identity and permissions it was minted for, so the
+// key binds all three inputs that decide them: the issuer, the key id (which rotates when the
+// machine user's key is replaced) and the scopes (which carry the project id, and therefore
+// the ROLES the callout reads). Change any one and the stored token is for a different
+// credential — it is discarded, not presented.
+func (s *ServiceUser) StoreKey() string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		strings.TrimSuffix(s.cfg.Issuer, "/"), s.key.KeyID, s.scopes(),
+	}, "\x00")))
+	return base64.RawURLEncoding.EncodeToString(sum[:16])
+}
+
 // Token returns a valid access token, minting a new one when needed.
+//
+// The order is memory, then Store if one is configured, then Zitadel. A stored token that was
+// minted for different credentials is ignored — see StoreKey.
 func (s *ServiceUser) Token(ctx context.Context) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -154,24 +186,85 @@ func (s *ServiceUser) Token(ctx context.Context) (string, error) {
 	if s.tokens.Valid() {
 		return s.tokens.AccessToken, nil
 	}
-	disc, err := Discover(ctx, s.cfg.HTTPClient, s.cfg.Issuer)
+	if s.loadStored() {
+		return s.tokens.AccessToken, nil
+	}
+	tokens, err := s.mint(ctx, false)
 	if err != nil {
 		return "", err
 	}
+	s.tokens = tokens
+	s.saveStored(tokens)
+	return tokens.AccessToken, nil
+}
+
+// mint runs the JWT-profile grant once.
+//
+// The token endpoint URL can come from a discovery document cached on disk for up to a day, so
+// a deployment that MOVES its endpoints would otherwise keep failing against a stale URL until
+// the TTL ran out. A transport-level failure against a cached document is therefore retried
+// once against a freshly fetched one — and only once, and only when the document was cached:
+// a real outage must still surface as an error rather than as two of them.
+func (s *ServiceUser) mint(ctx context.Context, refreshed bool) (Tokens, error) {
+	disc, cached, err := discover(ctx, s.cfg.HTTPClient, s.cfg.Issuer)
+	if err != nil {
+		return Tokens{}, err
+	}
 	assertion, err := s.assertion()
 	if err != nil {
-		return "", err
+		return Tokens{}, err
 	}
 	tokens, err := postForm(ctx, s.cfg.HTTPClient, disc.TokenEndpoint, url.Values{
 		"grant_type": {"urn:ietf:params:oauth:grant-type:jwt-bearer"},
 		"assertion":  {assertion},
 		"scope":      {s.scopes()},
 	})
-	if err != nil {
-		return "", err
+	if err == nil {
+		return tokens, nil
 	}
-	s.tokens = tokens
-	return tokens.AccessToken, nil
+	// An OAuth error means the endpoint answered: it is the wrong credential, not a wrong
+	// URL, and re-fetching discovery would only hide the real message.
+	var oauthErr *tokenError
+	if refreshed || !cached || errors.As(err, &oauthErr) {
+		return Tokens{}, err
+	}
+	ForgetDiscovery(s.cfg.Issuer)
+	return s.mint(ctx, true)
+}
+
+// loadStored promotes a stored token into the in-memory cache, reporting whether it left one
+// that is usable.
+//
+// Every failure here is non-fatal and silent: the store is an optimisation, and a missing,
+// unreadable or stale file just means minting a token, which is what would have happened
+// anyway. The one thing it must never do is present a token minted for other credentials,
+// which is what the key check is for.
+func (s *ServiceUser) loadStored() bool {
+	if s.cfg.Store == nil {
+		return false
+	}
+	stored, err := s.cfg.Store.Load()
+	if err != nil {
+		return false
+	}
+	if stored.CredentialKey != s.StoreKey() || !stored.Valid() {
+		return false
+	}
+	s.tokens = stored
+	return true
+}
+
+// saveStored writes the freshly minted token, stamped with the credentials it belongs to.
+func (s *ServiceUser) saveStored(t Tokens) {
+	if s.cfg.Store == nil {
+		return
+	}
+	t.CredentialKey = s.StoreKey()
+	// A service that cannot write its cache still has its token; failing the request over a
+	// read-only config dir would turn an optimisation into an outage.
+	if err := s.cfg.Store.Save(t); err != nil {
+		fmt.Fprintf(stderr, "jiku: warning: could not cache the access token: %v\n", err)
+	}
 }
 
 // Subject is the machine user's id. It comes from the key file rather than the token, so it

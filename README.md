@@ -144,6 +144,10 @@ error: jiku: invalid request:
 
 Pass `--no-check` to skip that and send exactly what you wrote.
 
+The contract is fetched only when a flag needs it — `--filter`, `--sort`, `--fields` or
+`--include`. A `jiku query tasks.get --id 7` names nothing to check, so it does not spend a
+round trip fetching 18 KB to validate nothing.
+
 **Values are typed from the contract.** A filter on an integer column sends `15`, not `"15"` —
 which matters, because a string field whose values happen to be digits (a project code) must
 *stay* a string.
@@ -170,6 +174,23 @@ CLI. Pagination and progress go to **stderr**, so stdout stays a clean array:
 ```bash
 jiku query tasks.list --all -o json | jq '[.[] | select(.state=="activo")] | length'
 ```
+
+### Many queries at once
+
+Every `jiku query` opens its own connection, which costs a token and about 2.5 round trips — more
+than the query itself. `jiku batch` runs a whole file of them over **one** connection:
+
+```bash
+$ cat queries.ndjson
+{"method":"tasks.list","payload":{"filter":{"projectId":15},"page":{"limit":5}}}
+{"method":"tasks.get","payload":{"id":1368},"id":"the-one-i-care-about"}
+
+$ jiku batch < queries.ndjson | jq -c '{id, n: (.data.items|length)}'
+```
+
+One NDJSON reply per request, in order, each with either `data` or an `error` carrying the code.
+A failing request does not stop the batch — pass `--stop-on-error` if it should — and the exit
+status is non-zero if any failed.
 
 ### The escape hatch
 
@@ -369,8 +390,13 @@ jiku doctor --key-file /etc/jiku/service-account.json
 export JIKU_KEY_FILE=/etc/jiku/service-account.json
 ```
 
-The JSON key Zitadel produces when you add a key to a machine user. No browser, no stored
-session: the key mints a token whenever one is needed.
+The JSON key Zitadel produces when you add a key to a machine user. No browser, no refresh token:
+the key mints a token whenever one is needed.
+
+The CLI caches the minted access token at `~/.config/jiku/service-token-<instance>.json` (mode
+`0600`), because minting one costs a round trip to Zitadel and every invocation would otherwise
+pay it. It is discarded automatically when the key or the project id changes, and `jiku logout`
+removes it along with the device flow's.
 
 Two requirements on the Zitadel side, both of which fail confusingly if missed:
 

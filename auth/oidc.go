@@ -2,12 +2,15 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -33,53 +36,158 @@ type discoveryCache struct {
 
 var discoveries = discoveryCache{seen: map[string]Discovery{}}
 
+// DiscoveryTTL is how long a discovery document cached on disk is reused.
+//
+// The document is a set of endpoint URLs that change about as often as the deployment does, so
+// the TTL is generous. It is not a security boundary: nothing here is trusted, and a stale
+// entry is corrected by ForgetDiscovery and a retry — see ServiceUser.Token — rather than by
+// waiting out the clock.
+const DiscoveryTTL = 24 * time.Hour
+
+// cachedDiscovery is one disk-cached discovery document with the time it was fetched.
+type cachedDiscovery struct {
+	Discovery Discovery `json:"discovery"`
+	FetchedAt time.Time `json:"fetched_at"`
+}
+
+// discoveryCacheDir is overridden in tests. Empty means the conventional config dir.
+var discoveryCacheDir string
+
+// discoveryCachePath is the file an issuer's document is cached in. The issuer is hashed
+// rather than escaped: it is a URL, and a URL does not reliably survive being a filename.
+func discoveryCachePath(issuer string) string {
+	dir := discoveryCacheDir
+	if dir == "" {
+		dir = ConfigDir()
+	}
+	sum := sha256.Sum256([]byte(issuer))
+	name := "discovery-" + base64.RawURLEncoding.EncodeToString(sum[:12]) + ".json"
+	return filepath.Join(dir, name)
+}
+
+// loadDiscoveryCache reads a non-expired document from disk. Every failure is silent and means
+// "no cache": this is an optimisation, and the fallback is the fetch that would have happened.
+func loadDiscoveryCache(issuer string) (Discovery, bool) {
+	b, err := os.ReadFile(discoveryCachePath(issuer))
+	if err != nil {
+		return Discovery{}, false
+	}
+	var c cachedDiscovery
+	if err := json.Unmarshal(b, &c); err != nil {
+		return Discovery{}, false
+	}
+	if c.Discovery.TokenEndpoint == "" || time.Since(c.FetchedAt) > DiscoveryTTL {
+		return Discovery{}, false
+	}
+	return c.Discovery, true
+}
+
+// saveDiscoveryCache writes the document for the next process. It holds no secret — these are
+// public endpoint URLs — so it is written 0644 under a 0700 directory.
+func saveDiscoveryCache(issuer string, d Discovery) {
+	path := discoveryCachePath(issuer)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return
+	}
+	b, err := json.Marshal(cachedDiscovery{Discovery: d, FetchedAt: time.Now()})
+	if err != nil {
+		return
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".discovery-*")
+	if err != nil {
+		return
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		return
+	}
+	_ = os.Rename(tmp.Name(), path)
+}
+
+// ForgetDiscovery drops an issuer's cached document, in memory and on disk.
+//
+// It is what makes the disk cache safe to keep for a day: a caller that finds the cached
+// endpoints no longer working calls this and retries, which re-fetches. Without it a moved
+// endpoint would be a day-long outage fixed only by deleting a file nobody knows about.
+func ForgetDiscovery(issuer string) {
+	issuer = strings.TrimSuffix(issuer, "/")
+	discoveries.mu.Lock()
+	delete(discoveries.seen, issuer)
+	discoveries.mu.Unlock()
+	_ = os.Remove(discoveryCachePath(issuer))
+}
+
 // Discover fetches (and memoises) the provider metadata for an issuer.
+//
+// There are three layers, cheapest first: this process's memory, a disk cache shared between
+// runs (see DiscoveryTTL), and the issuer itself. The disk layer is what stops a one-shot
+// process — the CLI — from paying a full HTTPS handshake to learn URLs that have not moved.
 func Discover(ctx context.Context, hc *http.Client, issuer string) (Discovery, error) {
+	d, _, err := discover(ctx, hc, issuer)
+	return d, err
+}
+
+// discover is Discover, also reporting whether the document came from a cache rather than from
+// the issuer. A caller that fails against cached endpoints can retry; one that just fetched
+// them has nothing fresher to try.
+func discover(ctx context.Context, hc *http.Client, issuer string) (Discovery, bool, error) {
 	issuer = strings.TrimSuffix(issuer, "/")
 	if issuer == "" {
-		return Discovery{}, fmt.Errorf("auth: no issuer configured")
+		return Discovery{}, false, fmt.Errorf("auth: no issuer configured")
 	}
 
 	discoveries.mu.Lock()
 	if d, ok := discoveries.seen[issuer]; ok {
 		discoveries.mu.Unlock()
-		return d, nil
+		return d, true, nil
 	}
 	discoveries.mu.Unlock()
+
+	if d, ok := loadDiscoveryCache(issuer); ok {
+		discoveries.mu.Lock()
+		discoveries.seen[issuer] = d
+		discoveries.mu.Unlock()
+		return d, true, nil
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		issuer+"/.well-known/openid-configuration", nil)
 	if err != nil {
-		return Discovery{}, err
+		return Discovery{}, false, err
 	}
 	resp, err := client(hc).Do(req)
 	if err != nil {
-		return Discovery{}, fmt.Errorf("auth: reaching %s: %w", issuer, err)
+		return Discovery{}, false, fmt.Errorf("auth: reaching %s: %w", issuer, err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return Discovery{}, fmt.Errorf("auth: reading discovery: %w", err)
+		return Discovery{}, false, fmt.Errorf("auth: reading discovery: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return Discovery{}, fmt.Errorf(
+		return Discovery{}, false, fmt.Errorf(
 			"auth: discovery of %s answered %d — is that the right issuer URL?",
 			issuer, resp.StatusCode)
 	}
 
 	var d Discovery
 	if err := json.Unmarshal(body, &d); err != nil {
-		return Discovery{}, fmt.Errorf("auth: parsing discovery of %s: %w", issuer, err)
+		return Discovery{}, false, fmt.Errorf("auth: parsing discovery of %s: %w", issuer, err)
 	}
 	if d.TokenEndpoint == "" {
-		return Discovery{}, fmt.Errorf("auth: %s publishes no token_endpoint", issuer)
+		return Discovery{}, false, fmt.Errorf("auth: %s publishes no token_endpoint", issuer)
 	}
 
 	discoveries.mu.Lock()
 	discoveries.seen[issuer] = d
 	discoveries.mu.Unlock()
-	return d, nil
+	saveDiscoveryCache(issuer, d)
+	return d, false, nil
 }
 
 // postForm sends a form-urlencoded request to a token endpoint and decodes either Tokens or

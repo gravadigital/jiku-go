@@ -4,8 +4,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -395,3 +399,349 @@ func TestDeviceFlowScopesIncludeOfflineAccess(t *testing.T) {
 }
 
 func testContext() context.Context { return context.Background() }
+
+// TestServiceUserReusesAStoredToken is the point of the Store: a short-lived process must not
+// pay a round trip to Zitadel for a token it already minted a minute ago.
+//
+// The token source is given a store that already holds a live token stamped with this
+// credential. A mint would have to reach the network, and the issuer here is unroutable, so a
+// test that passes proves the stored token was used.
+func TestServiceUserReusesAStoredToken(t *testing.T) {
+	key := generateTestKey(t)
+	cfg := ServiceUserConfig{Issuer: "https://unroutable.invalid", Key: key}
+
+	su, err := NewServiceUser(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := jwt(t, map[string]any{"sub": "42", "exp": time.Now().Add(time.Hour).Unix()})
+	store := &MemoryStore{Tokens: Tokens{AccessToken: live, CredentialKey: su.StoreKey()}}
+
+	cfg.Store = store
+	su, err = NewServiceUser(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := su.Token(context.Background())
+	if err != nil {
+		t.Fatalf("Token with a valid stored token reached the network: %v", err)
+	}
+	if got != live {
+		t.Errorf("Token = %q, want the stored one", got)
+	}
+}
+
+// TestServiceUserDiscardsATokenForOtherCredentials is the safety half of the cache.
+//
+// Rotate the machine user's key, or change the project id, and the token on disk grants
+// something other than what is being asked for now. Presenting it fails at the auth-callout,
+// three services from the file that caused it — so it must be discarded instead.
+func TestServiceUserDiscardsATokenForOtherCredentials(t *testing.T) {
+	live := jwt(t, map[string]any{"sub": "42", "exp": time.Now().Add(time.Hour).Unix()})
+
+	cases := []struct {
+		name   string
+		mutate func(*ServiceUserConfig)
+	}{
+		{name: "another project id", mutate: func(c *ServiceUserConfig) { c.ProjectID = "999" }},
+		{name: "another issuer", mutate: func(c *ServiceUserConfig) { c.Issuer = "https://other.invalid" }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			base := ServiceUserConfig{Issuer: "https://unroutable.invalid", Key: generateTestKey(t)}
+			minted, err := NewServiceUser(base)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// A token stored by the credential above, then read by a differently
+			// configured one.
+			now := base
+			c.mutate(&now)
+			now.Store = &MemoryStore{
+				Tokens: Tokens{AccessToken: live, CredentialKey: minted.StoreKey()},
+			}
+			su, err := NewServiceUser(now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := su.Token(context.Background()); err == nil {
+				t.Error("a token minted for other credentials was presented as this one's")
+			}
+		})
+	}
+}
+
+// TestServiceUserDiscardsAnExpiredStoredToken: a cached token past its expiry is refused by the
+// callout, and the symptom is an authorization violation that says nothing about time.
+func TestServiceUserDiscardsAnExpiredStoredToken(t *testing.T) {
+	cfg := ServiceUserConfig{Issuer: "https://unroutable.invalid", Key: generateTestKey(t)}
+	su, err := NewServiceUser(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := jwt(t, map[string]any{"sub": "42", "exp": time.Now().Add(-time.Minute).Unix()})
+	cfg.Store = &MemoryStore{Tokens: Tokens{AccessToken: stale, CredentialKey: su.StoreKey()}}
+
+	su, err = NewServiceUser(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := su.Token(context.Background()); err == nil {
+		t.Error("an expired stored token was presented instead of minting a new one")
+	}
+}
+
+// TestServiceUserStoresWhatItMints checks the write half: without it every run is a mint and
+// the cache never warms up. There is no network here, so this asserts the store is only
+// written on a successful mint — a failed one must leave the previous entry alone.
+func TestServiceUserStoresNothingOnAFailedMint(t *testing.T) {
+	store := &MemoryStore{}
+	su, err := NewServiceUser(ServiceUserConfig{
+		Issuer: "https://unroutable.invalid", Key: generateTestKey(t), Store: store,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := su.Token(context.Background()); err == nil {
+		t.Fatal("the unroutable issuer somehow answered")
+	}
+	if store.Tokens.AccessToken != "" {
+		t.Error("a failed mint wrote to the store")
+	}
+}
+
+// TestServiceUserWithNoStoreWritesNothing pins the default: a service holding a key needs no
+// stored state, and writing a credential where nobody asked for one is a surprise.
+func TestServiceUserWithNoStoreWritesNothing(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("JIKU_CONFIG_DIR", dir)
+
+	su, err := NewServiceUser(ServiceUserConfig{
+		Issuer: "https://unroutable.invalid", Key: generateTestKey(t),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = su.Token(context.Background())
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("a service user with no Store wrote %d file(s) to the config dir", len(entries))
+	}
+}
+
+// discoveryServer is a stand-in issuer that counts how many times its well-known was fetched.
+// Nothing leaves the machine: httptest listens on loopback.
+func discoveryServer(t *testing.T, hits *int) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		*hits++
+		fmt.Fprintf(w, `{"issuer":%q,"token_endpoint":%q,"userinfo_endpoint":%q}`,
+			"https://issuer.example", "https://issuer.example/oauth/v2/token",
+			"https://issuer.example/oidc/v1/userinfo")
+	})
+	return httptest.NewServer(mux)
+}
+
+// isolateDiscoveryCache points the disk cache at a temp dir and clears the in-process one, so
+// each test starts cold and writes nothing to the developer's real config dir.
+func isolateDiscoveryCache(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	prev := discoveryCacheDir
+	discoveryCacheDir = dir
+	t.Cleanup(func() { discoveryCacheDir = prev })
+
+	discoveries.mu.Lock()
+	discoveries.seen = map[string]Discovery{}
+	discoveries.mu.Unlock()
+	t.Cleanup(func() {
+		discoveries.mu.Lock()
+		discoveries.seen = map[string]Discovery{}
+		discoveries.mu.Unlock()
+	})
+}
+
+// TestDiscoveryIsCachedOnDisk is the whole point of the disk cache: a SECOND PROCESS must not
+// re-fetch a document the first one already has. The in-process memo is cleared between the
+// two calls to stand in for that second process.
+func TestDiscoveryIsCachedOnDisk(t *testing.T) {
+	isolateDiscoveryCache(t)
+	hits := 0
+	srv := discoveryServer(t, &hits)
+	defer srv.Close()
+
+	if _, err := Discover(context.Background(), srv.Client(), srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	if hits != 1 {
+		t.Fatalf("the first Discover made %d request(s), want 1", hits)
+	}
+
+	// A new process: same disk, empty memory.
+	discoveries.mu.Lock()
+	discoveries.seen = map[string]Discovery{}
+	discoveries.mu.Unlock()
+
+	d, err := Discover(context.Background(), srv.Client(), srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hits != 1 {
+		t.Errorf("the second process re-fetched discovery (%d requests), want the disk cache", hits)
+	}
+	if d.TokenEndpoint != "https://issuer.example/oauth/v2/token" {
+		t.Errorf("token_endpoint = %q, came back wrong from the cache", d.TokenEndpoint)
+	}
+}
+
+// TestDiscoveryCacheExpires: the endpoints are cached, not pinned. Past the TTL the document is
+// fetched again, so a deployment that moves an endpoint is picked up without anyone deleting a
+// file.
+func TestDiscoveryCacheExpires(t *testing.T) {
+	isolateDiscoveryCache(t)
+	hits := 0
+	srv := discoveryServer(t, &hits)
+	defer srv.Close()
+
+	if _, err := Discover(context.Background(), srv.Client(), srv.URL); err != nil {
+		t.Fatal(err)
+	}
+
+	// Backdate the cached document past the TTL, which is what a day's wait looks like.
+	path := discoveryCachePath(strings.TrimSuffix(srv.URL, "/"))
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c cachedDiscovery
+	if err := json.Unmarshal(b, &c); err != nil {
+		t.Fatal(err)
+	}
+	c.FetchedAt = time.Now().Add(-DiscoveryTTL - time.Minute)
+	if b, err = json.Marshal(c); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	discoveries.mu.Lock()
+	discoveries.seen = map[string]Discovery{}
+	discoveries.mu.Unlock()
+
+	if _, err := Discover(context.Background(), srv.Client(), srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	if hits != 2 {
+		t.Errorf("an expired cache was reused (%d requests), want a re-fetch", hits)
+	}
+}
+
+// TestDiscoveryCacheSurvivesGarbage: a cache file that does not parse, or that parses into a
+// document with no token_endpoint, must mean "no cache" rather than a failure or — worse — a
+// Discovery with empty endpoints handed to a caller that would POST to "".
+//
+// Each case is stamped with a FRESH FetchedAt on purpose. A zero timestamp is older than the
+// TTL, so an expired-entry check would mask the corruption check and this test would pass for
+// the wrong reason.
+func TestDiscoveryCacheSurvivesGarbage(t *testing.T) {
+	fresh := func(body string) []byte {
+		return []byte(fmt.Sprintf(`{"discovery":%s,"fetched_at":%q}`,
+			body, time.Now().Format(time.RFC3339Nano)))
+	}
+	cases := []struct {
+		name    string
+		content []byte
+	}{
+		{name: "not JSON at all", content: []byte("{not json")},
+		{name: "empty file", content: nil},
+		{name: "no token_endpoint", content: fresh(`{"issuer":"https://issuer.example"}`)},
+		{name: "discovery is null", content: fresh(`null`)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			isolateDiscoveryCache(t)
+			hits := 0
+			srv := discoveryServer(t, &hits)
+			defer srv.Close()
+
+			path := discoveryCachePath(strings.TrimSuffix(srv.URL, "/"))
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, c.content, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			d, err := Discover(context.Background(), srv.Client(), srv.URL)
+			if err != nil {
+				t.Fatalf("a bad cache file broke discovery instead of being ignored: %v", err)
+			}
+			if hits != 1 {
+				t.Errorf("hits = %d, want 1: the bad cache entry was used", hits)
+			}
+			if d.TokenEndpoint != "https://issuer.example/oauth/v2/token" {
+				t.Errorf("token_endpoint = %q, want the re-fetched one", d.TokenEndpoint)
+			}
+		})
+	}
+}
+
+// TestForgetDiscoveryClearsBothLayers: it is what lets a caller recover from endpoints that
+// moved inside the TTL, so it has to clear the disk too, not just this process's memory.
+func TestForgetDiscoveryClearsBothLayers(t *testing.T) {
+	isolateDiscoveryCache(t)
+	hits := 0
+	srv := discoveryServer(t, &hits)
+	defer srv.Close()
+
+	if _, err := Discover(context.Background(), srv.Client(), srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	ForgetDiscovery(srv.URL)
+
+	if _, err := os.Stat(discoveryCachePath(strings.TrimSuffix(srv.URL, "/"))); !os.IsNotExist(err) {
+		t.Error("ForgetDiscovery left the file on disk")
+	}
+	if _, err := Discover(context.Background(), srv.Client(), srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	if hits != 2 {
+		t.Errorf("hits = %d after ForgetDiscovery, want a re-fetch", hits)
+	}
+}
+
+// TestServiceStoreIsPrivate: the cached access token is a bearer credential until it expires.
+// Anything that can read the file can act as the machine user, so the mode is part of the
+// contract, not an implementation detail — the README states it.
+func TestServiceStoreIsPrivate(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("JIKU_CONFIG_DIR", dir)
+
+	st := DefaultServiceStore("dev")
+	if err := st.Save(Tokens{AccessToken: "x", ObtainedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(st.Location())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("%s is mode %04o, want 0600", st.Location(), perm)
+	}
+}
+
+// TestServiceStoreIsSeparateFromTheDeviceFlows: one file for both would make `jiku logout`
+// choose which half of a shared file to delete, and would let a person's refresh token and a
+// machine's access token overwrite each other.
+func TestServiceStoreIsSeparateFromTheDeviceFlows(t *testing.T) {
+	t.Setenv("JIKU_CONFIG_DIR", t.TempDir())
+	if DefaultServiceStore("dev").Location() == DefaultStore("dev").Location() {
+		t.Error("the service user and the device flow share a token file")
+	}
+}

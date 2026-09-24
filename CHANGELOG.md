@@ -5,6 +5,48 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) as scoped by the
 [compatibility policy](README.md#compatibility).
 
+## [Unreleased]
+
+Performance work, from a baseline measured against a local stack. A CLI command took ~1.4 s
+against a local bus, of which the query itself was ~5 ms; the rest was authentication, the
+connection and a contract fetch, all paid on every invocation.
+
+### Added
+
+- **`jiku batch`** — reads one request per line from stdin and answers NDJSON over a **single**
+  connection. Connecting costs a token and roughly 2.5 round trips, which `jiku query` pays per
+  invocation; a script running twenty queries now pays it once. A failing request does not stop
+  the batch (`--stop-on-error` if it should) and the exit status reports whether any failed.
+- **`Client.ListInto`** — runs a `{resource}.list` and decodes the items straight into a
+  destination, returning only the page. Same request as `List`; one decode instead of three.
+- **`ServiceUserConfig.Store`** — optional persistence for a service user's minted access token,
+  with `auth.DefaultServiceStore`. **Off by default**: a long-lived service wants its token in
+  memory, and writing a credential where nobody asked for one is a surprise. The CLI opts in,
+  which is what stops it minting a fresh token against Zitadel on every command.
+- **`auth.ForgetDiscovery`** and `auth.DiscoveryTTL` — the escape hatch and the lifetime for the
+  new on-disk discovery cache.
+- **`Config.Trace`, `RequestTrace`, `ConnectTrace` and `Client.ConnectTiming`** — a per-request
+  timing hook. **Nil by default, and a client without it sends exactly what it sent before**:
+  the tracing headers are attached only when a hook is present.
+
+### Changed
+
+- **The OIDC discovery document is cached on disk** for 24 h, not just memoised per process, so
+  a one-shot CLI invocation no longer pays a full HTTPS handshake to learn URLs that have not
+  moved. A mint that fails against cached endpoints re-fetches them once and retries, so a
+  deployment that moves an endpoint is not a day-long outage.
+- **`jiku query` fetches the contract only when a flag needs it** — `--filter`, `--sort`,
+  `--fields` or `--include`. `jiku query tasks.get --id 7` names nothing to validate and no
+  longer spends a round trip and 18 KB fetching the contract to check nothing. Validation and
+  the typing of filter values are unchanged wherever they applied before.
+- **`Collection.Into` decodes in one pass** for a collection that came off the wire, instead of
+  re-encoding `Items` and decoding the result. `Client.All` and the CLI's output path join the
+  raw items rather than re-encoding them, which matters most on an `--all` sweep where the cost
+  was paid per page. `Items` is unchanged, and a `Collection` built by hand still works; one
+  whose `Items` was filtered in place still decodes what `Items` says.
+- **`jiku logout` removes the service user's cached token too**, not only the device flow's.
+  Leaving it behind would have made `logout` a no-op for a machine user.
+
 ## [1.1.0] - 2026-09-14
 
 ### Added

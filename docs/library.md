@@ -43,7 +43,13 @@ mode somebody has already lost time to:
    can disagree with the credential presenting it.
 
 A `Client` is safe for concurrent use and meant to be **long-lived** — one per process. Connecting
-costs a round trip to Zitadel plus a NATS handshake that runs the auth-callout.
+costs a round trip to Zitadel plus a NATS handshake that runs the auth-callout: on a local bus
+that is roughly **2.5 round trips plus the token**, against about 1 round trip for the query you
+came to run. Connect once and keep it; a `Client` per request spends most of its time
+reconnecting.
+
+If your process is short-lived and runs several queries, that cost is paid once rather than per
+query — which is exactly why the CLI has `jiku batch`.
 
 ### Configuration from the environment
 
@@ -62,8 +68,8 @@ this, and it is how a container normally does it.
 
 ### A service — `auth.NewServiceUser`
 
-The right choice for anything unattended. No browser, no stored session, no refresh token to
-manage: the key mints a token whenever one is needed.
+The right choice for anything unattended. No browser, no refresh token to manage: the key mints
+a token whenever one is needed.
 
 ```go
 src, err := auth.NewServiceUser(auth.ServiceUserConfig{
@@ -72,6 +78,27 @@ src, err := auth.NewServiceUser(auth.ServiceUserConfig{
     ProjectID: "275672248377933829",
 })
 ```
+
+Nothing is written to disk by default, and a long-lived process wants it that way: the token is
+held in memory and reminted as it nears expiry.
+
+A process that is **invoked repeatedly and exits** is the exception. It mints a fresh token on
+every run — around 650 ms against Zitadel — for a token the previous run had already. Give it a
+`Store` and that becomes a file read:
+
+```go
+src, err := auth.NewServiceUser(auth.ServiceUserConfig{
+    Issuer:    "https://id.grava.io",
+    KeyFile:   "/etc/jiku/service-account.json",
+    ProjectID: "275672248377933829",
+    Store:     auth.DefaultServiceStore("dev"),   // ~/.config/jiku/service-token-dev.json, 0600
+})
+```
+
+What is cached is an **access token**, not a refresh token: it expires on its own and mints
+nothing. A stored token is discarded rather than presented when the key id, the issuer or the
+scopes no longer match the ones it was minted for — rotate the key and the next run mints
+afresh. The CLI does this for you whenever a `key_file` is configured.
 
 Requirements on the Zitadel side: **Access Token Type = JWT**, and the machine user needs a
 **role in the project**. Both fail confusingly if missed — see
@@ -147,6 +174,19 @@ col.Page.Total          // only with Count
 Items stay `json.RawMessage` until you decode them, because the returned field set changes with
 `Fields` and `Include` — there is no single struct that fits every call.
 
+When you already know the shape you want, `ListInto` decodes straight into it and hands back
+only the page:
+
+```go
+var tasks []Task
+page, err := client.ListInto(ctx, "tasks", jiku.List{Limit: 50}, &tasks)
+```
+
+It is the same request. The difference is the decoding: `List` + `Into` walks the reply twice,
+`ListInto` once. On a large page that is worth having — a 250 KB reply spends about 8 ms of its
+36 ms in decoding — and on a small one it does not matter. Use `List` when the items are to be
+passed around as raw JSON, or when you need the page before deciding how to decode.
+
 ### One record
 
 ```go
@@ -194,6 +234,30 @@ stop condition. Only the absence of a cursor is.
 
 `client.All(ctx, "tasks", query, &tasks)` collects everything, which is convenient and dangerous
 in the same way — it holds the whole collection in memory.
+
+### Asking for less
+
+Every request costs one round trip and no more — the protocol adds no chatter. What varies is
+the size of the reply, and that is the caller's to control:
+
+| Request | Size | Local |
+|---|---|---|
+| `tasks.list`, 50 items, default fields | 20 KB | 7 ms |
+| `tasks.list`, 200 items, every includable | 250 KB | 36 ms |
+| `tasks.list` with `Count: jiku.CountOnly` | — | 3 ms |
+
+Three habits follow from that, in the order they pay off:
+
+- **Name your `Fields`, and only the `Include`s you use.** An includable you do not read is a
+  join core runs and bytes the bus carries.
+- **Use `Count: jiku.CountOnly` when you only want the total.** It does not run the rows query
+  at all, which is why it is the cheapest thing in the table.
+- **Let the default page size be.** A bigger `Limit` is fewer requests but a larger reply; the
+  round trip you save is usually cheaper than the bytes you add. Measure before raising it.
+
+These numbers were measured against a local bus, where the round trip is free. Over a real
+network the round trip dominates for small replies and bandwidth dominates for large ones —
+which makes the advice above stronger, not weaker.
 
 ### Parsing filters from strings
 
@@ -326,6 +390,30 @@ r, _ := contract.Resource("comments")
 r.ForVariant("task")    // one variant
 r.ForVariant("")        // the union of all of them
 ```
+
+---
+
+## Timing a request
+
+`Config.Trace` is called once per request with its breakdown. It is **off unless you set it**,
+and a client without it sends exactly what it would have sent otherwise — the headers below are
+only attached when a hook is present.
+
+```go
+cfg.Trace = func(t jiku.RequestTrace) {
+    log.Printf("%s round=%s decode=%s bytes=%d", t.Method, t.RoundTrip, t.Decode, t.RespBytes)
+}
+client, err := jiku.Connect(ctx, cfg)
+
+fmt.Printf("%+v\n", client.ConnectTiming())   // Subject, Token, Dial, Total
+```
+
+`RequestTrace` carries `Encode`, `RoundTrip` and `Decode`, the request and response sizes, and
+the error if the request failed. With a hook set, the request also carries `Jiku-Sent-At` and
+`Jiku-Trace-Id`; when core runs with its own timing enabled it answers `Jiku-Timing`, and
+`t.Server` is then its breakdown — `nil` when it is not. `Inbound` and `Outbound` are the two
+legs over the bus, and they only mean anything when core and the caller share a clock, which in
+practice means the same machine.
 
 ---
 

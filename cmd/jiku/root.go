@@ -51,6 +51,9 @@ Getting started
   3. jiku describe   see what the API actually serves, straight from the server
   4. jiku query tasks.list --filter projectId=15
 
+Each invocation opens its own connection, which costs a token and about 2.5 round trips. For
+several queries in a row, "jiku batch" runs them all over one connection.
+
 Configuration is resolved flag > environment > file > default. The file lives at
 ~/.config/jiku/config.yaml; run "jiku config init" to write a commented one.
 
@@ -81,6 +84,7 @@ Everything here is also a Go library:
 		newDoctorCmd(),
 		newDescribeCmd(),
 		newQueryCmd(),
+		newBatchCmd(),
 		newCommandCmd(),
 		newEventsCmd(),
 		newRawCmd(),
@@ -128,10 +132,13 @@ func overrideStr(dest *string, v string) {
 // cannot be renewed without a human.
 func tokenSource(cfg jiku.Config) (auth.TokenSource, error) {
 	if cfg.Zitadel.KeyFile != "" {
+		// The store is what keeps a one-shot CLI invocation from minting a token against
+		// Zitadel every single time, which costs more than the query it is about to run.
 		return auth.NewServiceUser(auth.ServiceUserConfig{
 			Issuer:    cfg.Zitadel.Issuer,
 			KeyFile:   cfg.Zitadel.KeyFile,
 			ProjectID: cfg.Zitadel.ProjectID,
+			Store:     auth.DefaultServiceStore(cfg.Instance),
 		})
 	}
 	if cfg.Zitadel.ClientID == "" {

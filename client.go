@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,8 @@ type Client struct {
 
 	mu       sync.Mutex
 	contract *Contract
+
+	connectTrace ConnectTrace
 
 	// permMu guards the permissions-violation bookkeeping below.
 	//
@@ -61,10 +64,14 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 		return nil, err
 	}
 
+	var ct ConnectTrace
+	connectStart := time.Now()
+
 	userID := cfg.UserID
 	if userID == "" {
 		var err error
 		userID, err = cfg.Auth.Subject(ctx)
+		ct.Subject = time.Since(connectStart)
 		if err != nil {
 			return nil, fmt.Errorf("jiku: resolving the caller identity: %w", err)
 		}
@@ -75,9 +82,11 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 
 	// Fail before connecting if no token can be had. A NATS authorization violation says
 	// nothing about which of the two credentials was the problem.
+	tokenStart := time.Now()
 	if _, err := cfg.Auth.Token(ctx); err != nil {
 		return nil, fmt.Errorf("jiku: obtaining an access token: %w", err)
 	}
+	ct.Token = time.Since(tokenStart)
 
 	opts := []nats.Option{
 		nats.Name(cfg.Name),
@@ -110,10 +119,14 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 		client.notePermissionError(err)
 	}))
 
+	dialStart := time.Now()
 	nc, err := nats.Connect(cfg.Servers, opts...)
 	if err != nil {
 		return nil, connectError(cfg, err)
 	}
+	ct.Dial = time.Since(dialStart)
+	ct.Total = time.Since(connectStart)
+	client.connectTrace = ct
 	client.nc = nc
 	return client, nil
 }
@@ -252,11 +265,20 @@ func (c *Client) Request(ctx context.Context, service, method string, payload an
 		return nil, ErrNotConnected
 	}
 
+	var trace *RequestTrace
+	encodeStart := time.Now()
 	body, err := encodePayload(service, payload)
 	if err != nil {
 		return nil, err
 	}
 	subject := Subject(c.cfg.Instance, c.userID, service, method)
+	if c.cfg.Trace != nil {
+		trace = &RequestTrace{
+			ID: nextTraceID(), Method: method, Subject: subject,
+			Encode: time.Since(encodeStart), ReqBytes: len(body),
+		}
+		defer func() { c.cfg.Trace(*trace) }()
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
 	defer cancel()
@@ -266,19 +288,49 @@ func (c *Client) Request(ctx context.Context, service, method string, payload an
 	// going to come.
 	permission := c.watchPermission(subject, cancel)
 
-	msg, err := c.nc.RequestWithContext(ctx, subject, body)
+	var msg *nats.Msg
+	var sentAt time.Time
+	if trace != nil {
+		out := nats.NewMsg(subject)
+		out.Data = body
+		sentAt = time.Now()
+		out.Header.Set(HeaderSentAt, strconv.FormatInt(sentAt.UnixNano(), 10))
+		out.Header.Set(HeaderTraceID, trace.ID)
+		msg, err = c.nc.RequestMsgWithContext(ctx, out)
+		recvAt := time.Now()
+		trace.RoundTrip = recvAt.Sub(sentAt)
+		if err == nil {
+			trace.RespBytes = len(msg.Data)
+			readServerTiming(trace, msg.Header, sentAt, recvAt)
+		}
+	} else {
+		msg, err = c.nc.RequestWithContext(ctx, subject, body)
+	}
 	if err != nil {
 		if permErr := permission(); permErr != nil {
-			return nil, permissionError(c, subject, method, permErr)
+			err = permissionError(c, subject, method, permErr)
+		} else {
+			err = requestError(c, subject, method, err)
 		}
-		return nil, requestError(c, subject, method, err)
+		if trace != nil {
+			trace.Err = err
+		}
+		return nil, err
 	}
 	permission()
 
+	decodeStart := time.Now()
 	var reply Reply
 	if err := json.Unmarshal(msg.Data, &reply); err != nil {
-		return nil, fmt.Errorf("jiku: %s answered something that is not an envelope: %w\n  raw: %s",
+		err = fmt.Errorf("jiku: %s answered something that is not an envelope: %w\n  raw: %s",
 			method, err, truncate(msg.Data, 400))
+		if trace != nil {
+			trace.Err = err
+		}
+		return nil, err
+	}
+	if trace != nil {
+		trace.Decode = time.Since(decodeStart)
 	}
 	return &reply, nil
 }
@@ -409,6 +461,36 @@ func (c *Client) List(ctx context.Context, resource string, q List) (*Collection
 		return nil, fmt.Errorf("jiku: decoding the %s.list reply: %w", resource, err)
 	}
 	return &col, nil
+}
+
+// ListInto runs a `{resource}.list` and decodes the items straight into dest, returning the
+// page.
+//
+//	var tasks []Task
+//	page, err := c.ListInto(ctx, "tasks", jiku.List{Limit: 50}, &tasks)
+//
+// It is List followed by Collection.Into with one decode instead of three, for the common case
+// where the caller already knows the shape they want. Use List when the items are to be passed
+// around as raw JSON, or when the page is needed before deciding how to decode.
+func (c *Client) ListInto(ctx context.Context, resource string, q List, dest any) (Page, error) {
+	data, err := c.Query(ctx, resource+".list", q.payload())
+	if err != nil {
+		return Page{}, err
+	}
+	var reply struct {
+		Items json.RawMessage `json:"items"`
+		Page  Page            `json:"page"`
+	}
+	if err := json.Unmarshal(data, &reply); err != nil {
+		return Page{}, fmt.Errorf("jiku: decoding the %s.list reply: %w", resource, err)
+	}
+	if len(reply.Items) == 0 {
+		return reply.Page, nil
+	}
+	if err := json.Unmarshal(reply.Items, dest); err != nil {
+		return reply.Page, fmt.Errorf("jiku: decoding %s items into %T: %w", resource, dest, err)
+	}
+	return reply.Page, nil
 }
 
 // Get runs a `{resource}.get`.

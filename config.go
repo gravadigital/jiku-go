@@ -49,6 +49,11 @@ type Config struct {
 	// than access to somebody else's namespace. It exists for diagnostics.
 	UserID string `yaml:"-"`
 
+	// Trace, when set, is called once per request with its timing breakdown, and the request
+	// carries the Jiku-Sent-At and Jiku-Trace-Id headers so core can time the inbound leg.
+	// Nil — the default — sends exactly what an untraced client sends.
+	Trace func(RequestTrace) `yaml:"-"`
+
 	// Zitadel holds the identity provider settings the CLI needs to obtain a token. A
 	// library caller that builds its own Auth can ignore this entirely.
 	Zitadel ZitadelConfig `yaml:"zitadel"`
