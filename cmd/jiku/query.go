@@ -72,7 +72,7 @@ Values are typed from the contract: a filter on an integer column sends 15, not 
 			if err != nil {
 				return err
 			}
-			defer client.Close()
+			defer closeClient(client)
 
 			// A raw payload bypasses the flag surface entirely, for anything the flags
 			// cannot express yet.
@@ -87,9 +87,17 @@ Values are typed from the contract: a filter on an integer column sends 15, not 
 			// The contract is fetched for validation and for typing filter values. Failing to
 			// fetch it is not fatal: the query can still go out unvalidated, which is better
 			// than refusing to work because the describer is unavailable.
+			//
+			// It is fetched only when one of the flags it informs was actually used. A
+			// `tasks.get --id 7` has no name to check and no value to type, so paying a round
+			// trip and 18 KB to validate nothing is pure latency — and this CLI reconnects on
+			// every invocation, so the per-client cache never amortises it.
 			var res jiku.Resource
-			if !noCheck {
-				if contract, cErr := client.Contract(ctx); cErr == nil {
+			if !noCheck && needsContract(filters, sortBy, fields, include) {
+				endContract := tl.phase("contract")
+				contract, cErr := client.Contract(ctx)
+				endContract()
+				if cErr == nil {
 					if r, rErr := contract.Resource(resource); rErr == nil {
 						// comments, activity and subscriptions keep their whitelists per
 						// variant. ForVariant("") unions them, which is the permissive and
@@ -215,6 +223,21 @@ func queryAll(ctx context.Context, client *jiku.Client, resource string, q jiku.
 	return emit(os.Stdout, nil, itemsJSON(items))
 }
 
+// needsContract reports whether any flag was used that the contract informs.
+//
+// Both jobs it does are per-NAME: checking a name against a whitelist, and typing a filter
+// VALUE from the column it names (`--filter projectId=15` must send 15, not "15"). With none
+// of these flags there is no name and no value, so the contract would be fetched and then
+// read zero times.
+//
+// --id, --limit, --cursor and --entity-type are deliberately absent: an id and a limit are
+// integers whatever the sheet says, a cursor is opaque, and the discriminator is checked by
+// core. Adding a flag here that the contract does not actually inform costs a round trip on
+// every command that uses it.
+func needsContract(filters, sortBy, fields, include []string) bool {
+	return len(filters) > 0 || len(sortBy) > 0 || len(fields) > 0 || len(include) > 0
+}
+
 // reportPage puts pagination on stderr, so stdout stays a clean array for jq.
 func reportPage(p jiku.Page) {
 	msg := fmt.Sprintf("  %d item(s), limit %d", p.Returned, p.Limit)
@@ -227,16 +250,27 @@ func reportPage(p jiku.Page) {
 	progressf("%s\n", msg)
 }
 
-// itemsJSON re-encodes items as one array, so -o json/table sees an array and not a stream.
+// itemsJSON joins items into one array, so -o json/table sees an array and not a stream.
+//
+// The items are raw JSON already, so they are concatenated rather than re-encoded: on an
+// --all sweep this runs over the whole collection, not one page.
 func itemsJSON(items []json.RawMessage) json.RawMessage {
-	if items == nil {
+	if len(items) == 0 {
 		return json.RawMessage("[]")
 	}
-	b, err := json.Marshal(items)
-	if err != nil {
-		return json.RawMessage("[]")
+	n := 2 + len(items) - 1
+	for _, it := range items {
+		n += len(it)
 	}
-	return b
+	out := make([]byte, 0, n)
+	out = append(out, '[')
+	for i, it := range items {
+		if i > 0 {
+			out = append(out, ',')
+		}
+		out = append(out, it...)
+	}
+	return append(out, ']')
 }
 
 func asInt64(v any) (int64, error) {

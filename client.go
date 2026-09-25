@@ -5,10 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/gravadigital/jiku-go/auth"
 	"github.com/nats-io/nats.go"
 )
 
@@ -24,6 +28,8 @@ type Client struct {
 
 	mu       sync.Mutex
 	contract *Contract
+
+	connectTrace ConnectTrace
 
 	// permMu guards the permissions-violation bookkeeping below.
 	//
@@ -61,23 +67,46 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 		return nil, err
 	}
 
+	var ct ConnectTrace
+	connectStart := time.Now()
+	logger := cfg.Logger
+	// Always traced: it is a few clock reads, and ConnectTiming is always available. The
+	// first call that did real work is the one kept — a device flow's Subject reads the store
+	// and its Token then answers from memory, and the interesting one is the first.
+	authCtx := auth.WithTrace(ctx, func(t auth.TokenTrace) {
+		if ct.Auth.Origin == "" || ct.Auth.Origin == auth.OriginMemory {
+			ct.Auth = t
+		}
+	})
+	fail := func(err error) (*Client, error) {
+		if debugEnabled(ctx, logger) {
+			ct.Total = time.Since(connectStart)
+			logger.LogAttrs(ctx, slog.LevelDebug, "jiku: connect failed",
+				append(ct.attrs(), slog.String("err", firstLine(err.Error())))...)
+		}
+		return nil, err
+	}
+
 	userID := cfg.UserID
 	if userID == "" {
 		var err error
-		userID, err = cfg.Auth.Subject(ctx)
+		userID, err = cfg.Auth.Subject(authCtx)
+		ct.Subject = time.Since(connectStart)
 		if err != nil {
-			return nil, fmt.Errorf("jiku: resolving the caller identity: %w", err)
+			return fail(fmt.Errorf("jiku: resolving the caller identity: %w", err))
 		}
 	}
 	if userID == "" {
-		return nil, fmt.Errorf("jiku: the token carries no `sub`, so there is no caller identity")
+		return fail(fmt.Errorf("jiku: the token carries no `sub`, so there is no caller identity"))
 	}
 
 	// Fail before connecting if no token can be had. A NATS authorization violation says
 	// nothing about which of the two credentials was the problem.
-	if _, err := cfg.Auth.Token(ctx); err != nil {
-		return nil, fmt.Errorf("jiku: obtaining an access token: %w", err)
+	tokenStart := time.Now()
+	if _, err := cfg.Auth.Token(authCtx); err != nil {
+		return fail(fmt.Errorf("jiku: obtaining an access token: %w", err))
 	}
+	ct.Token = time.Since(tokenStart)
 
 	opts := []nats.Option{
 		nats.Name(cfg.Name),
@@ -85,7 +114,14 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 		// TokenHandler, not Token: it is called again on every reconnect, so a long-lived
 		// connection that drops after the token expired comes back with a fresh one.
 		nats.TokenHandler(func() string {
-			tok, err := cfg.Auth.Token(context.Background())
+			tctx := context.Background()
+			if debugEnabled(tctx, logger) {
+				tctx = auth.WithTrace(tctx, func(t auth.TokenTrace) {
+					logger.LogAttrs(tctx, slog.LevelDebug, "jiku: token for (re)connect",
+						tokenAttrs(t)...)
+				})
+			}
+			tok, err := cfg.Auth.Token(tctx)
 			if err != nil {
 				return ""
 			}
@@ -110,11 +146,29 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 		client.notePermissionError(err)
 	}))
 
-	nc, err := nats.Connect(cfg.Servers, opts...)
-	if err != nil {
-		return nil, connectError(cfg, err)
+	if logger != nil {
+		opts = append(opts,
+			nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+				logger.Debug("jiku: disconnected", "err", err)
+			}),
+			nats.ReconnectHandler(func(nc *nats.Conn) {
+				logger.Debug("jiku: reconnected", "server", nc.ConnectedUrl())
+			}))
 	}
+
+	dialStart := time.Now()
+	nc, err := nats.Connect(cfg.Servers, opts...)
+	ct.Dial = time.Since(dialStart)
+	if err != nil {
+		return fail(connectError(cfg, err))
+	}
+	ct.Total = time.Since(connectStart)
+	client.connectTrace = ct
 	client.nc = nc
+	if debugEnabled(ctx, logger) {
+		logger.LogAttrs(ctx, slog.LevelDebug, "jiku: connected",
+			append(ct.attrs(), slog.String("server", nc.ConnectedUrl()))...)
+	}
 	return client, nil
 }
 
@@ -248,15 +302,66 @@ func (c *Client) ConnectedURL() string {
 // an error. Use it when you want to inspect a failure rather than handle it as one; Query and
 // Command are the usual entry points.
 func (c *Client) Request(ctx context.Context, service, method string, payload any) (*Reply, error) {
+	reply, trace, err := c.request(ctx, service, method, payload)
+	c.finishTrace(ctx, trace, err)
+	return reply, err
+}
+
+// request is Request without reporting the trace, so a caller that decodes further — List,
+// ListInto — can add that time to it before it is reported. The trace is nil when nothing is
+// listening for it.
+func (c *Client) request(ctx context.Context, service, method string, payload any) (*Reply, *RequestTrace, error) {
+	msg, trace, err := c.roundTrip(ctx, service, method, payload)
+	if err != nil {
+		return nil, trace, err
+	}
+	decodeStart := time.Now()
+	var reply Reply
+	if err := json.Unmarshal(msg.Data, &reply); err != nil {
+		return nil, trace, notAnEnvelope(method, msg.Data, err)
+	}
+	if trace != nil {
+		trace.Decode = time.Since(decodeStart)
+		trace.ErrorCode = reply.ErrorCode
+	}
+	return &reply, trace, nil
+}
+
+// queryInto runs a query and decodes the envelope and its data in one pass, the data landing
+// in dest. See decodeInto for why that is worth a separate path.
+func (c *Client) queryInto(ctx context.Context, method string, payload, dest any) (*RequestTrace, error) {
+	msg, trace, err := c.roundTrip(ctx, ServiceQueries, method, payload)
+	if err != nil {
+		return trace, err
+	}
+	decodeStart := time.Now()
+	code, err := decodeInto(method, msg.Data, dest)
+	if trace != nil {
+		trace.Decode = time.Since(decodeStart)
+		trace.ErrorCode = code
+	}
+	return trace, err
+}
+
+// roundTrip publishes a request and returns the reply undecoded.
+func (c *Client) roundTrip(ctx context.Context, service, method string, payload any) (*nats.Msg, *RequestTrace, error) {
 	if c == nil || c.nc == nil {
-		return nil, ErrNotConnected
+		return nil, nil, ErrNotConnected
 	}
 
+	var trace *RequestTrace
+	encodeStart := time.Now()
 	body, err := encodePayload(service, payload)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	subject := Subject(c.cfg.Instance, c.userID, service, method)
+	if c.tracing(ctx) {
+		trace = &RequestTrace{
+			ID: nextTraceID(), Method: method, Subject: subject,
+			Encode: time.Since(encodeStart), ReqBytes: len(body), start: encodeStart,
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
 	defer cancel()
@@ -266,21 +371,90 @@ func (c *Client) Request(ctx context.Context, service, method string, payload an
 	// going to come.
 	permission := c.watchPermission(subject, cancel)
 
-	msg, err := c.nc.RequestWithContext(ctx, subject, body)
+	var msg *nats.Msg
+	var sentAt time.Time
+	if trace != nil {
+		out := nats.NewMsg(subject)
+		out.Data = body
+		sentAt = time.Now()
+		out.Header.Set(HeaderSentAt, strconv.FormatInt(sentAt.UnixNano(), 10))
+		out.Header.Set(HeaderTraceID, trace.ID)
+		msg, err = c.nc.RequestMsgWithContext(ctx, out)
+		recvAt := time.Now()
+		trace.RoundTrip = recvAt.Sub(sentAt)
+		if err == nil {
+			trace.RespBytes = len(msg.Data)
+			readServerTiming(trace, msg.Header, sentAt, recvAt)
+		}
+	} else {
+		msg, err = c.nc.RequestWithContext(ctx, subject, body)
+	}
 	if err != nil {
 		if permErr := permission(); permErr != nil {
-			return nil, permissionError(c, subject, method, permErr)
+			err = permissionError(c, subject, method, permErr)
+		} else {
+			err = requestError(c, subject, method, err)
 		}
-		return nil, requestError(c, subject, method, err)
+		return nil, trace, err
 	}
 	permission()
+	return msg, trace, nil
+}
 
-	var reply Reply
-	if err := json.Unmarshal(msg.Data, &reply); err != nil {
-		return nil, fmt.Errorf("jiku: %s answered something that is not an envelope: %w\n  raw: %s",
-			method, err, truncate(msg.Data, 400))
+func notAnEnvelope(method string, body []byte, err error) error {
+	return fmt.Errorf("jiku: %s answered something that is not an envelope: %w\n  raw: %s",
+		method, err, truncate(body, 400))
+}
+
+// replyInto is an envelope whose data decodes straight into a destination. Its Data shadows the
+// embedded Reply.Data — the shallower field wins in encoding/json — and holding a non-nil
+// pointer, it is decoded into the value pointed to rather than replaced.
+type replyInto struct {
+	Reply
+	Data any `json:"data,omitempty"`
+}
+
+// shapeError is a success reply whose data does not fit the destination: the envelope was
+// fine, the caller's type was not.
+type shapeError struct{ err error }
+
+func (e *shapeError) Error() string { return e.err.Error() }
+func (e *shapeError) Unwrap() error { return e.err }
+
+// decodeInto decodes an envelope and its data in ONE pass, the data landing in dest, and
+// returns the envelope's errorCode along with the error.
+//
+// The route it replaces decoded the envelope with data as a RawMessage and then decoded that
+// into the destination, scanning every byte of the reply twice. On a 250 KB page the second
+// scan is about 1.8 ms — a third to a half of the SDK's whole share of the request.
+//
+// A failure envelope is reported as the *Error it carries, before anything about the data: a
+// type mismatch is only the caller's problem on a reply that succeeded. encoding/json keeps
+// decoding past a type mismatch, so the status is known either way.
+func decodeInto(method string, body []byte, dest any) (string, error) {
+	reply := replyInto{Data: dest}
+	err := json.Unmarshal(body, &reply)
+	var typeErr *json.UnmarshalTypeError
+	if err != nil && !errors.As(err, &typeErr) {
+		return reply.ErrorCode, notAnEnvelope(method, body, err)
 	}
-	return &reply, nil
+	if failure := reply.Reply.asError(method); failure != nil {
+		return reply.ErrorCode, failure
+	}
+	if err != nil {
+		return reply.ErrorCode, &shapeError{err}
+	}
+	return reply.ErrorCode, nil
+}
+
+// nonNilPointer is the check json.Unmarshal makes on its own destination, which a destination
+// nested inside an interface would otherwise skip: a non-pointer there is silently REPLACED by
+// a map rather than refused.
+func nonNilPointer(dest any) error {
+	if v := reflect.ValueOf(dest); v.Kind() != reflect.Pointer || v.IsNil() {
+		return fmt.Errorf("jiku: the destination must be a non-nil pointer, got %T", dest)
+	}
+	return nil
 }
 
 // requestError explains the two ways a request fails on the transport, both of which are
@@ -356,7 +530,9 @@ func permissionError(c *Client, subject, method string, err error) error {
 
 // Query publishes to the read plane and returns the envelope's data, or a *Error on failure.
 func (c *Client) Query(ctx context.Context, method string, payload any) (json.RawMessage, error) {
-	return c.do(ctx, ServiceQueries, method, payload)
+	data, trace, err := c.do(ctx, ServiceQueries, method, payload)
+	c.finishTrace(ctx, trace, err)
+	return data, err
 }
 
 // Command publishes to the write plane and returns the envelope's data, or a *Error on failure.
@@ -376,18 +552,22 @@ func (c *Client) Query(ctx context.Context, method string, payload any) (json.Ra
 //   - There is no JetStream and no retry. If core is down the request times out and the
 //     operation did not happen.
 func (c *Client) Command(ctx context.Context, method string, payload any) (json.RawMessage, error) {
-	return c.do(ctx, ServiceCommands, method, payload)
+	data, trace, err := c.do(ctx, ServiceCommands, method, payload)
+	c.finishTrace(ctx, trace, err)
+	return data, err
 }
 
-func (c *Client) do(ctx context.Context, service, method string, payload any) (json.RawMessage, error) {
-	reply, err := c.Request(ctx, service, method, payload)
+// do runs a request and turns a failure envelope into an error. The caller reports the trace,
+// once it has finished decoding what do returned.
+func (c *Client) do(ctx context.Context, service, method string, payload any) (json.RawMessage, *RequestTrace, error) {
+	reply, trace, err := c.request(ctx, service, method, payload)
 	if err != nil {
-		return nil, err
+		return nil, trace, err
 	}
 	if err := reply.asError(method); err != nil {
-		return nil, err
+		return nil, trace, err
 	}
-	return reply.Data, nil
+	return reply.Data, trace, nil
 }
 
 // List runs a `{resource}.list`.
@@ -399,16 +579,53 @@ func (c *Client) do(ctx context.Context, service, method string, payload any) (j
 //	})
 //	var tasks []Task
 //	err = col.Into(&tasks)
-func (c *Client) List(ctx context.Context, resource string, q List) (*Collection, error) {
-	data, err := c.Query(ctx, resource+".list", q.payload())
+func (c *Client) List(ctx context.Context, resource string, q List) (col *Collection, err error) {
+	data, trace, err := c.do(ctx, ServiceQueries, resource+".list", q.payload())
+	defer func() { c.finishTrace(ctx, trace, err) }()
 	if err != nil {
 		return nil, err
 	}
-	var col Collection
-	if err := json.Unmarshal(data, &col); err != nil {
+	defer trace.unwrapFrom(time.Now())
+	col = &Collection{}
+	if err := json.Unmarshal(data, col); err != nil {
 		return nil, fmt.Errorf("jiku: decoding the %s.list reply: %w", resource, err)
 	}
-	return &col, nil
+	return col, nil
+}
+
+// ListInto runs a `{resource}.list` and decodes the items straight into dest, returning the
+// page.
+//
+//	var tasks []Task
+//	page, err := c.ListInto(ctx, "tasks", jiku.List{Limit: 50}, &tasks)
+//
+// It is List followed by Collection.Into with one decode instead of three — the envelope and the
+// items in a single pass — for the common case where the caller already knows the shape they
+// want. Use List when the items are to be passed
+// around as raw JSON, or when the page is needed before deciding how to decode.
+func (c *Client) ListInto(ctx context.Context, resource string, q List, dest any) (page Page, err error) {
+	if err := nonNilPointer(dest); err != nil {
+		return Page{}, err
+	}
+	trace, err := c.queryInto(ctx, resource+".list", q.payload(), listDest(dest, &page))
+	defer func() { c.finishTrace(ctx, trace, err) }()
+	var shape *shapeError
+	if errors.As(err, &shape) {
+		return page, fmt.Errorf("jiku: decoding %s items into %T: %w", resource, dest, shape.err)
+	}
+	if err != nil {
+		return Page{}, err
+	}
+	return page, nil
+}
+
+// listDest is where a list reply's data lands for ListInto: the items into the caller's
+// destination, the page into page. Items absent or null leave the destination untouched.
+func listDest(dest any, page *Page) any {
+	return &struct {
+		Items any   `json:"items"`
+		Page  *Page `json:"page"`
+	}{Items: dest, Page: page}
 }
 
 // Get runs a `{resource}.get`.
@@ -424,20 +641,22 @@ func (c *Client) Get(ctx context.Context, resource string, q Get) (*Item, error)
 }
 
 // Tags runs `requirements.tags`, the one query with a shape of its own. It is not paginated.
-func (c *Client) Tags(ctx context.Context, projectID int64, key string) ([]TagGroup, error) {
+func (c *Client) Tags(ctx context.Context, projectID int64, key string) (groups []TagGroup, err error) {
 	filter := map[string]any{"projectId": projectID}
 	if key != "" {
 		filter["key"] = key
 	}
-	data, err := c.Query(ctx, "requirements.tags", map[string]any{"filter": filter})
-	if err != nil {
-		return nil, err
-	}
 	var out struct {
 		Items []TagGroup `json:"items"`
 	}
-	if err := json.Unmarshal(data, &out); err != nil {
-		return nil, fmt.Errorf("jiku: decoding the requirements.tags reply: %w", err)
+	trace, err := c.queryInto(ctx, "requirements.tags", map[string]any{"filter": filter}, &out)
+	defer func() { c.finishTrace(ctx, trace, err) }()
+	var shape *shapeError
+	if errors.As(err, &shape) {
+		return nil, fmt.Errorf("jiku: decoding the requirements.tags reply: %w", shape.err)
+	}
+	if err != nil {
+		return nil, err
 	}
 	return out.Items, nil
 }

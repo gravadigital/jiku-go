@@ -13,7 +13,9 @@ import (
 // Store persists tokens between runs of a program.
 //
 // It exists for the device flow, where losing the tokens means going back to the browser. A
-// service user needs none: its key mints a token whenever one is wanted.
+// service user does not NEED one — its key mints a token whenever one is wanted — but a
+// short-lived process that mints on every run pays a round trip to the identity provider each
+// time, so ServiceUserConfig takes one too.
 type Store interface {
 	Load() (Tokens, error)
 	Save(Tokens) error
@@ -41,6 +43,22 @@ func DefaultStore(instance string) *FileStore {
 		instance = "dev"
 	}
 	return &FileStore{Path: filepath.Join(ConfigDir(), fmt.Sprintf("tokens-%s.json", instance))}
+}
+
+// DefaultServiceStore is the conventional per-instance cache for a service user's access
+// token:
+//
+//	$XDG_CONFIG_HOME/jiku/service-token-<instance>.json
+//
+// It is a SEPARATE file from the device flow's, not a shared one keyed by credential: the two
+// hold different things — a refresh token that must be guarded for as long as it lives, and an
+// access token that expires on its own — and one file would mean `jiku logout` deciding which
+// half to delete.
+func DefaultServiceStore(instance string) *FileStore {
+	if instance == "" {
+		instance = "dev"
+	}
+	return &FileStore{Path: filepath.Join(ConfigDir(), fmt.Sprintf("service-token-%s.json", instance))}
 }
 
 // ConfigDir is where the CLI keeps its config and tokens, honouring XDG_CONFIG_HOME.

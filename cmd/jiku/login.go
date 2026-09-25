@@ -99,9 +99,10 @@ func newLogoutCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "logout",
 		Short: "Delete the stored tokens",
-		Long: `Deletes the stored token file for the current instance.
+		Long: `Deletes the stored token files for the current instance.
 
-The tokens are only cached credentials, so this is a local operation: it revokes nothing in
+Both are removed: the device flow's tokens and the service user's cached access token. The
+tokens are only cached credentials, so this is a local operation: it revokes nothing in
 Zitadel. Anything already holding the access token keeps working until it expires.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -110,16 +111,29 @@ Zitadel. Anything already holding the access token keeps working until it expire
 				return err
 			}
 			overrideStr(&cfg.Instance, g.instance)
-			path := auth.DefaultStore(cfg.Instance).Location()
 
-			if err := os.Remove(path); err != nil {
-				if os.IsNotExist(err) {
-					fmt.Fprintf(os.Stderr, "Nothing to do: no tokens stored at %s\n", path)
-					return nil
-				}
-				return err
+			// Both stores, because either one on its own is enough to keep working: leaving
+			// the service user's cache behind would make `logout` a no-op for a machine
+			// user, which is not what anybody typing it means.
+			paths := []string{
+				auth.DefaultStore(cfg.Instance).Location(),
+				auth.DefaultServiceStore(cfg.Instance).Location(),
 			}
-			fmt.Fprintf(os.Stderr, "Removed %s\n", path)
+			removed := 0
+			for _, path := range paths {
+				if err := os.Remove(path); err != nil {
+					if os.IsNotExist(err) {
+						continue
+					}
+					return err
+				}
+				fmt.Fprintf(os.Stderr, "Removed %s\n", path)
+				removed++
+			}
+			if removed == 0 {
+				fmt.Fprintf(os.Stderr, "Nothing to do: no tokens stored for instance %q\n",
+					cfg.Instance)
+			}
 			return nil
 		},
 	}
