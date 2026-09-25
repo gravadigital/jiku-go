@@ -7,6 +7,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-25
+
 Performance work, from a baseline measured against a local stack. A CLI command took ~1.4 s
 against a local bus, of which the query itself was ~5 ms; the rest was authentication, the
 connection and a contract fetch, all paid on every invocation.
@@ -74,6 +76,11 @@ connection and a contract fetch, all paid on every invocation.
 - **`Describe` and `Tags` decode in one pass**, like `ListInto`.
 - **`jiku logout` removes the service user's cached token too**, not only the device flow's.
   Leaving it behind would have made `logout` a no-op for a machine user.
+- **`events` documents `actor.name` as normally a real name**, not usually an id. Core used to
+  resolve the name only for commands arriving through the api, so a directly published command
+  emitted the caller's id; it now resolves it on both channels. The id remains the fallback for
+  an identity with no name on file, so compare against `ID` and have something to show when the
+  two are equal. No code change — the client passes through whatever core sends.
 
 ## [1.1.0] - 2026-09-14
 
@@ -281,7 +288,8 @@ both a library and a CLI.
 - **Release binaries are built with `-trimpath`**, so the same tag builds to the same bytes and no
   build machine's paths ship inside a binary.
 
-[Unreleased]: https://github.com/gravadigital/jiku-go/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/gravadigital/jiku-go/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/gravadigital/jiku-go/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/gravadigital/jiku-go/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/gravadigital/jiku-go/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/gravadigital/jiku-go/releases/tag/v1.0.0
