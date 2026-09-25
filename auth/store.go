@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 // Store persists tokens between runs of a program.
@@ -139,8 +140,30 @@ func (s *FileStore) Save(t Tokens) error {
 }
 
 // MemoryStore keeps tokens in memory only, for tests and for callers that persist elsewhere.
-type MemoryStore struct{ Tokens Tokens }
+//
+// It is guarded because a Store is reached from whatever goroutine asked for a token, and
+// nats.go asks from its own: the token handler runs on every reconnect, so a refresh that
+// writes here can land while another goroutine is reading. FileStore is safe for the same
+// reason by different means — its write is a rename over the target — and this is the
+// in-memory equivalent of that promise.
+type MemoryStore struct {
+	mu sync.Mutex
+	// Tokens is the stored value. Prefer Load and Save; reading this field directly races
+	// with a concurrent Save.
+	Tokens Tokens
+}
 
-func (m *MemoryStore) Load() (Tokens, error) { return m.Tokens, nil }
-func (m *MemoryStore) Save(t Tokens) error   { m.Tokens = t; return nil }
-func (m *MemoryStore) Location() string      { return "(memory)" }
+func (m *MemoryStore) Load() (Tokens, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.Tokens, nil
+}
+
+func (m *MemoryStore) Save(t Tokens) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Tokens = t
+	return nil
+}
+
+func (m *MemoryStore) Location() string { return "(memory)" }

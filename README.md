@@ -555,6 +555,7 @@ fails the release rather than publishing a version `go get` cannot resolve.
 | [docs/auth.md](docs/auth.md) | the auth chain, link by link, and every way it breaks |
 | [docs/protocol.md](docs/protocol.md) | subjects, the envelope, error codes, pagination |
 | [docs/library.md](docs/library.md) | the Go API in depth |
+| [docs/reference.md](docs/reference.md) | every exported identifier, and which behaviour is Jiku's contract rather than this client's choice — the page to implement another client against |
 | [docs/commands.md](docs/commands.md) | field reference for the 23 write commands |
 | [docs/events.md](docs/events.md) | the domain event stream: permissions, filters, delivery |
 | [docs/sync-jiku.md](docs/sync-jiku.md) | how this client is kept in step with Jiku's contract |

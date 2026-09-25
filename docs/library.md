@@ -10,9 +10,12 @@ Two packages:
 |---|---|
 | `github.com/gravadigital/jiku-go` | package `jiku`: `Client`, queries, commands, the envelope, the contract, filters, pagination |
 | `github.com/gravadigital/jiku-go/auth` | package `auth`: token sources — the device flow and service users |
+| `github.com/gravadigital/jiku-go/events` | package `events`: the domain event stream — see [events.md](events.md) |
 
 `go doc github.com/gravadigital/jiku-go` for the full reference. This page is the
-narrative version.
+narrative version; [reference.md](reference.md) is the exhaustive one, and marks which
+behaviour is **Jiku's contract** rather than this client's choice — that is the page to
+implement a client in another language against.
 
 ---
 

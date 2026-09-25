@@ -24,10 +24,14 @@ import (
 // may appear and one deleted may vanish. The keyset cursor guarantees no row is SKIPPED for a
 // stable ordering, which is the property that matters for a full sweep.
 type Iterator struct {
-	client   *Client
 	ctx      context.Context
 	resource string
 	query    List
+
+	// list fetches one page. It is a field rather than a direct call to Client.List so the
+	// page sequence can be driven in a test without a bus — the termination rule below is
+	// the whole reason this type exists, and it is not testable against a live server.
+	list func(ctx context.Context, resource string, q List) (*Collection, error)
 
 	items []json.RawMessage
 	pos   int
@@ -45,37 +49,51 @@ type Iterator struct {
 //
 // Nothing is requested until the first call to Next.
 func (c *Client) Iterate(ctx context.Context, resource string, q List) *Iterator {
-	return &Iterator{client: c, ctx: ctx, resource: resource, query: q}
+	return &Iterator{ctx: ctx, resource: resource, query: q, list: c.List}
 }
 
 // Next advances to the next item, fetching the next page when the current one runs out. It
 // returns false at the end of the collection and on error — check Err to tell them apart.
+//
+// The fetch is a LOOP rather than a recursive call, because an empty page that still carries a
+// cursor is a legitimate reply (see fetch) and so several may arrive in a row. Recursing on
+// each one costs a stack frame per page, which a server answering "empty, here is a cursor"
+// indefinitely would turn into a stack overflow — a crash where the honest outcome is a walk
+// that keeps asking. A loop just keeps asking.
 func (it *Iterator) Next() bool {
-	if it.err != nil || it.done {
-		return false
+	for {
+		if it.err != nil || it.done {
+			return false
+		}
+		if it.pos < len(it.items) {
+			it.pos++
+			it.seen++
+			return true
+		}
+		if it.started && !it.page.HasMore() {
+			it.done = true
+			return false
+		}
+		if !it.fetch() {
+			return false
+		}
 	}
-	if it.pos < len(it.items) {
-		it.pos++
-		it.seen++
-		return true
-	}
-	if it.started && !it.page.HasMore() {
-		it.done = true
-		return false
-	}
-	if !it.fetch() {
-		return false
-	}
-	return it.Next()
 }
 
-// fetch pulls the next page. An empty page with no cursor ends the iteration.
+// fetch pulls the next page.
+//
+// An empty page ends the iteration ONLY when it carries no cursor. An empty page WITH a cursor
+// is not the end: the byte budget (max_payload × 0.5) cuts a page wherever the reply would
+// otherwise exceed what NATS accepts and emits a cursor at the cut, so "no items this time"
+// and "no more items" are different answers. Treating the first as the second truncated the
+// sweep silently — the caller got a short collection, no error, and nothing to distinguish it
+// from a genuinely small one.
 func (it *Iterator) fetch() bool {
 	q := it.query
 	if it.started {
 		q.Cursor = it.page.Cursor
 	}
-	col, err := it.client.List(it.ctx, it.resource, q)
+	col, err := it.list(it.ctx, it.resource, q)
 	if err != nil {
 		it.err = err
 		return false
@@ -83,7 +101,7 @@ func (it *Iterator) fetch() bool {
 	it.started = true
 	it.items, it.pos, it.page = col.Items, 0, col.Page
 	it.pages++
-	if len(it.items) == 0 {
+	if len(it.items) == 0 && !it.page.HasMore() {
 		it.done = true
 		return false
 	}
