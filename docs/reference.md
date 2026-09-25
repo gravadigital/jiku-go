@@ -18,6 +18,11 @@ What is **not** here: the wire protocol itself ([protocol.md](protocol.md)), the
 ([auth.md](auth.md)), the event plane's semantics ([events.md](events.md)), and the write
 commands' fields ([commands.md](commands.md)). This page is the client's API, not Jiku's.
 
+The `MarshalJSON` and `UnmarshalJSON` methods on `Collection`, `ErrorDetails`, `auth.Audience` and
+`auth.Claims` are exported because `encoding/json` requires it, not because anyone calls them.
+Each exists for a reason a port still needs, and each is described where its behaviour is —
+they are not listed again as identifiers.
+
 ---
 
 ## Contents
@@ -31,6 +36,7 @@ commands' fields ([commands.md](commands.md)). This page is the client's API, no
 - [`jiku` — filters](#jiku--filters)
 - [`jiku` — errors](#jiku--errors)
 - [`jiku` — subjects](#jiku--subjects)
+- [`jiku` — timing and tracing](#jiku--timing-and-tracing)
 - [`auth` — token sources](#auth--token-sources)
 - [`events` — the event plane](#events--the-event-plane)
 - [Porting checklist](#porting-checklist)
@@ -106,6 +112,8 @@ authorization violation says nothing about which of the two credentials was the 
 | `Auth` | `auth.TokenSource` | required; the only thing that decides what you may do |
 | `UserID` | `string` | **leave empty.** Diagnostics only — the callout authorises publishing under one's own id, so a value disagreeing with the token gets an authorization violation |
 | `Zitadel` | `ZitadelConfig` | `Issuer`, `ClientID`, `ProjectID`, `KeyFile` |
+| `Trace` | `func(RequestTrace)` | per-request timing hook. **Nil by default, and nil sends exactly what an untraced client sends** |
+| `Logger` | `*slog.Logger` | debug logs of every step and how long it took. Nil by default; at a level above debug it logs nothing and sends nothing extra |
 
 ```go
 const DefaultTimeout  = 15 * time.Second
@@ -156,6 +164,7 @@ building on it is safe.
 ```go
 func (c *Client) List(ctx, resource string, q List) (*Collection, error)
 func (c *Client) Get(ctx, resource string, q Get) (*Item, error)
+func (c *Client) ListInto(ctx, resource string, q List, dest any) (Page, error)
 func (c *Client) Iterate(ctx, resource string, q List) *Iterator
 func (c *Client) All(ctx, resource string, q List, dest any) error
 func (c *Client) Tags(ctx, projectID int64, key string) ([]TagGroup, error)
@@ -165,6 +174,13 @@ func (c *Client) Query(ctx, method string, payload any) (json.RawMessage, error)
 `Query` is the generic read: any method, any payload. `List` and `Get` are the shaped ones.
 `Tags` covers `requirements.tags`, **the one query with a shape of its own** — it is not
 paginated.
+
+`ListInto` is `List` plus `Collection.Into`, with the envelope and the items decoded in **one**
+pass rather than three. **It is idiom, not contract, and most ports should not have it.** It
+exists because Go's decoder cannot reach the items without first materialising the envelope and
+then the collection; a language whose JSON parser hands back native values in a single pass has
+nothing here to fix. Use `List` when the items are to be passed around as raw JSON, or when the
+page is needed before deciding how to decode.
 
 ### Below the two planes: `Request`
 
@@ -239,6 +255,12 @@ func (p Page) HasMore() bool
 Items stay raw because **the returned field set changes with `Fields` and `Include`**, so no one
 struct fits every call. `Total` is a pointer: absent unless `Count` was requested, and "absent"
 must not read as zero.
+
+`Collection` decodes itself (`UnmarshalJSON`) so the items array is kept exactly as it arrived
+instead of being re-encoded, and records how many items that array held. `Into` compares that
+count against `len(Items)` to tell a caller who filtered `Items` in place — who must get what
+`Items` now says — from one who did not, who gets the original bytes. Both are consequences of
+`Items` being exported and mutable; **neither is contract.**
 
 ### Pagination — the rule that matters most
 
@@ -397,6 +419,10 @@ accepts.
 `Field` carries `Kind`, `Enum`, `Search`, `SearchNumeric`, `Contains`, `Cardinality`, `Fields`,
 `Scalar`, `Optional`, `Cap`, `TruncatedFlag`. **`TruncatedFlag` is a SIBLING key**
 (`commentsTruncated`), never a nested field.
+
+`Enum` is a list of `EnumValue` — `Value` plus the `Label` a UI shows, so a client renders the
+label and sends the value. `Contains` is a `ContainsShape`, the key names a containment filter
+accepts (`["key", "value"]`); it is the sheet declaring that shape, not this client assuming it.
 
 `Defaults` carries `Sort`, `Limit` and `MaxLimit` — and `MaxLimit` is **the only place a caller
 can learn the real ceiling**, since exceeding it is clamped silently.
@@ -561,6 +587,68 @@ body can.**
 
 ---
 
+## `jiku` — timing and tracing
+
+```go
+type RequestTrace struct {
+    ID, Method, Subject       string
+    Encode, RoundTrip, Decode time.Duration
+    Unwrap                    time.Duration   // the SECOND decoding pass, where there is one
+    Inbound, Outbound         time.Duration   // zero unless core sent timing headers
+    ReqBytes, RespBytes       int
+    Server                    *ServerTiming
+    Total                     time.Duration
+    ErrorCode                 string
+    Err                       error
+}
+
+type ConnectTrace struct {
+    Subject, Token, Dial, Total time.Duration
+    Auth                        auth.TokenTrace
+}
+
+type ServerTiming struct { Subject string; TotalMs float64; InboundMs *float64
+                           ReqBytes, RespBytes int; Spans []ServerSpan }
+type ServerSpan   struct { Name string; Start, Ms float64; Rows *int }
+
+func (c *Client) ConnectTiming() ConnectTrace
+```
+
+> **Almost none of this section is contract.** A port needs no equivalent of any of these types,
+> and should instrument with whatever its ecosystem already uses. What follows is here so a
+> porter can recognise the parts that *are* shared with core and skip the rest.
+
+**[contract] The five header names, IF a port implements tracing at all.** They are an agreement
+with core, not a local choice, so a port that invents its own names gets no server breakdown:
+
+```
+Jiku-Sent-At   Jiku-Trace-Id      sent by the client
+Jiku-Timing    Jiku-Recv-At   Jiku-Resp-At    answered by core, only under QUERY_TIMING=true
+```
+
+**[contract] Instrumentation that is off must change nothing on the wire.** The headers ride only
+when a hook is present, so an untraced client sends exactly what it sent before. A port that
+attaches them unconditionally is sending two headers on every request for a feature nobody asked
+for, which is a cost paid by every caller for the benefit of none.
+
+`ConnectTiming` reports the last `Connect`, broken down. It matters because **a token read from
+memory and one minted at Zitadel differ by three orders of magnitude and are otherwise
+indistinguishable** — that is the measurement the breakdown exists to make possible, and it is
+worth reproducing even where none of these types are.
+
+The legs of a `RequestTrace` only add up when client and core share a clock, which is true on one
+machine and false in general:
+
+```
+Encode → [Inbound: bus + core's queue] → Server.TotalMs → [Outbound: bus back] → Decode
+```
+
+`Unwrap` is the second decoding pass where one exists — the `Collection` of `List`. It is zero for
+`ListInto`, `Describe` and `Tags`, which decode envelope and data together, and for `Query`,
+`Command` and `Request`, which hand the data back undecoded.
+
+---
+
 ## `auth` — token sources
 
 ```go
@@ -586,10 +674,12 @@ func (s *ServiceUser) Token(ctx) (string, error)
 func (s *ServiceUser) Subject(ctx) (string, error)
 func (s *ServiceUser) Claims(ctx) (Claims, error)
 func (s *ServiceUser) UserID() string    // from the key file, no network call
+func (s *ServiceUser) StoreKey() string  // which credential a stored token belongs to
 ```
 
 `ServiceUserConfig`: `Issuer`, `KeyFile` **or** inline `Key`, `ProjectID`, `Scopes`, `Audience`,
-`AssertionTTL`, `HTTPClient`.
+`AssertionTTL`, `HTTPClient`, `Store`. `ServiceAccountKey` is the shape of the JSON file Zitadel
+hands you — `Type`, `KeyID`, `Key`, `UserID` — and `KeyFile` reads it.
 
 Two Zitadel-side requirements, both of which fail confusingly:
 
@@ -601,6 +691,30 @@ Two Zitadel-side requirements, both of which fail confusingly:
   only when `profile` was requested. Without it: no row, and every later request answers
   `caller_not_authorized` — three services away from the cause.
 
+#### Caching a minted token — optional, and OFF by default
+
+```go
+func DefaultServiceStore(instance string) *FileStore
+    // ~/.config/jiku/service-token-<instance>.json — a SEPARATE file from the device flow's
+```
+
+A service user does not need a `Store`: its key mints a token whenever one is wanted. A
+short-lived process that mints on every run pays a round trip to Zitadel each time, which is why
+`ServiceUserConfig` accepts one — but **it is off unless asked for**, because writing a credential
+where nobody requested one is a surprise. What is cached is an **access** token, not a refresh
+token: it expires on its own and can mint nothing.
+
+> **[contract] IF a port caches a minted token, the cache key must bind the issuer, the key id
+> and the scopes.** All three decide what the token grants — the key id rotates when the machine
+> user's key is replaced, and the scopes carry the project id and therefore the ROLES the callout
+> reads. A cache keyed on less will one day present a token that grants something else, and that
+> failure lands at the auth-callout, three services from the file that caused it.
+
+The service file is separate from the device flow's rather than one file keyed by credential: the
+two hold different things — a refresh token that must be guarded for as long as it lives, and an
+access token that expires by itself — and one file would make `logout` choose which half to
+delete.
+
 ### Device flow — RFC 8628, for a person
 
 ```go
@@ -610,7 +724,15 @@ func (d *DeviceFlow) Token(ctx) (string, error)
 func (d *DeviceFlow) Subject(ctx) (string, error)
 func (d *DeviceFlow) Claims(ctx) (Claims, error)
 var ErrLoginRequired
+
+type DeviceAuth struct { DeviceCode, UserCode, VerificationURI,
+                         VerificationURIComplete string; ExpiresIn, Interval int }
+func SetPromptOutput(w io.Writer)   // where the code and the URL are printed
 ```
+
+`DeviceAuth` is the provider's answer to the authorization request: the code to show a person and
+the URI to send them to. `SetPromptOutput` redirects that prompt, which a CLI needs so the
+instructions do not land in piped stdout.
 
 **[contract] `Token` never starts an interactive flow** — it returns `ErrLoginRequired` instead.
 A call that silently blocks on a human is what takes a service down at 3am; `Login` is separate
@@ -620,6 +742,29 @@ for that reason.
 renewed token **without the roles claim**, which connects to nothing. Zitadel also **rotates the
 refresh token on every use**, so the new one must be kept — and when a response carries none, the
 previous one is preserved rather than dropped.
+
+### Discovering the provider's endpoints
+
+```go
+func Discover(ctx, hc *http.Client, issuer string) (Discovery, error)
+type Discovery struct { Issuer, TokenEndpoint,
+                        DeviceAuthorizationEndpoint, UserinfoEndpoint string }
+
+const DiscoveryTTL = 24 * time.Hour
+func ForgetDiscovery(issuer string)
+```
+
+Three layers, cheapest first: this process's memory, a disk cache shared between runs, then the
+issuer. The disk layer is what stops a one-shot process from paying a full HTTPS handshake to
+learn URLs that have not moved.
+
+**A cache with a day-long TTL needs a way out, and it is the reason `ForgetDiscovery` is
+exported.** A mint that fails against *cached* endpoints re-fetches them once and retries; one
+that fails against freshly fetched endpoints does not, so a real outage still surfaces as one
+error rather than two. An **OAuth error never triggers the retry** — the endpoint answered and the
+credential is wrong, so re-fetching would only bury the message that says so. A port that caches
+discovery without this path turns a moved endpoint into a day-long outage fixed only by deleting
+a file nobody knows exists.
 
 ### The reserved Zitadel scopes — [contract]
 
@@ -638,6 +783,7 @@ connects to nothing and the only error is `Authorization Violation`.
 ```go
 type Store interface { Load() (Tokens, error); Save(Tokens) error; Location() string }
 func DefaultStore(instance string) *FileStore     // ~/.config/jiku/tokens-<instance>.json, 0600
+func DefaultServiceStore(instance string) *FileStore   // service-token-<instance>.json
 func ConfigDir() string
 ```
 
@@ -667,6 +813,31 @@ OIDC allows.
 `Tokens.Expiry()` prefers the JWT's own `exp` over `expires_in`, because the claim is what the
 callout reads and it survives a file round-trip. `Valid()` treats an **unknown** expiry as valid:
 the token may be opaque, and the authority on whether it is accepted is the callout.
+
+### Where a token came from
+
+```go
+func WithTrace(ctx context.Context, fn func(TokenTrace)) context.Context
+
+type TokenOrigin string
+const OriginMemory, OriginStore, OriginMinted, OriginRefreshed TokenOrigin
+
+type TokenTrace struct { Origin TokenOrigin
+                         Store, Discovery, Sign, Exchange time.Duration
+                         DiscoveryFrom string          // "memory", "disk" or "network"
+                         HTTP []HTTPTrace }
+type HTTPTrace  struct { Step, Host string; Reused bool
+                         DNS, Connect, TLS, Wait, Total time.Duration; Status int }
+```
+
+**Not contract** — a port instruments however it likes. It is carried **in the context**, after
+`net/http/httptrace`, for one reason worth reproducing: **a `TokenSource` written by somebody else
+can be observed without being reconfigured.** An interface with two methods has nowhere to put a
+hook, and adding one would break every implementation.
+
+`ConnectTrace.Auth` carries it for `Connect`. Where `Subject` and `Token` each asked for a token —
+a device flow does — the call kept is **the one that did the work**, not the last one, since the
+second answers from memory and would report a millisecond for a mint that took a second.
 
 ---
 
@@ -727,7 +898,7 @@ indistinguishable from a quiet system.
 | Field | Meaning |
 |---|---|
 | `Filter` | `""` for everything, `requirement.>`, `task.created` |
-| `Start` | `StartNew` (default), `StartAll`, `StartAt` |
+| `Start` | a `StartPolicy`: `StartNew` (default), `StartAll`, `StartAt` |
 | `StartTime` | used when `Start` is `StartAt` |
 | `Durable` | **leave empty unless you mean it** |
 
@@ -746,6 +917,10 @@ are gone, with no way to know which existed.
 
 `Event` carries `EventID`, `Type`, `Version`, `OccurredAt`, `CorrelationID`, `Actor`, `Entity`,
 `Snapshot`, `Changes`, `Recipients`, `Comment`, `VisibilityLevel` and `Raw`.
+
+`Entity` is an `EntityRef`: `Type` (`EntityRequirement` or `EntityTask`), `ID`, and **`ProjectID`,
+which is always present whatever the entity — an explicit rule of the envelope**, and therefore
+the one field a consumer can route on without decoding a snapshot.
 
 - **`EventID` is the field to deduplicate by** — a ULID, and the only stable identity an event
   has. The stream sequence belongs to the transport; a redelivery keeps the same `EventID`.
@@ -804,6 +979,7 @@ includable of the read plane, not a column of the entity.
 ```go
 func RequiredPermissions(instance string) string
 type PermissionError struct { Subject, Instance, Op string; Err error }
+func (e *PermissionError) Unwrap() error   // the underlying NATS error stays reachable
 ```
 
 **[contract] A permissions violation on SUBSCRIBE is asynchronous.** The subscription call
@@ -877,6 +1053,14 @@ marked **[contract]** above; this is the same list, condensed, in the order a po
 - [ ] Claims are parsed **without** verifying the signature, and never used for a security
       decision
 - [ ] Both Zitadel role-claim shapes are merged; `aud` decodes as string **or** array
+- [ ] *If* a minted token is cached, the key binds issuer + key id + scopes
+- [ ] *If* discovery is cached, there is a path that drops it and re-fetches — and an OAuth
+      error does not take it
+
+**Instrumentation**, if there is any
+
+- [ ] Off by default, and off sends exactly what an uninstrumented client sends
+- [ ] The five `Jiku-*` header names are reproduced verbatim, or core's breakdown never arrives
 
 **Events**
 
