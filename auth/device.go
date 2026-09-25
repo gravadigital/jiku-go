@@ -25,7 +25,8 @@ type DeviceConfig struct {
 	// Issuer is the Zitadel instance, e.g. https://id.grava.io.
 	Issuer string
 	// ClientID of a NATIVE app in Zitadel with the "Device Code" grant type enabled. Without
-	// that grant the token endpoint answers unauthorized_client.
+	// that grant the token endpoint answers unauthorized_client. It also needs "Refresh
+	// Token": without it Zitadel ignores offline_access silently and every expiry is a login.
 	ClientID string
 	// ProjectID, when set, adds the two reserved Zitadel scopes that make the token usable
 	// on this bus:
@@ -150,9 +151,22 @@ func (d *DeviceFlow) Token(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("%w: run `jiku login`", ErrLoginRequired)
 	}
 	err = fmt.Errorf("%w: run `jiku login`", ErrLoginRequired)
+	if d.tokens.AccessToken != "" {
+		// An expired session with no refresh token is not a session that ran its course: it
+		// is one that could never be renewed, and logging in again only restarts the clock.
+		err = fmt.Errorf("%w: the stored token expired and there is no refresh token to renew "+
+			"it\n  hint: %s", ErrLoginRequired, noRefreshTokenHint)
+	}
 	tr.finish(origin, err)
 	return "", err
 }
+
+// noRefreshTokenHint explains a login that yielded no refresh token. offline_access is requested
+// by default, and Zitadel ignores it silently unless the app has the Refresh Token grant — so the
+// symptom is a login a day, with nothing pointing at the app's configuration.
+const noRefreshTokenHint = "Zitadel issued no refresh token, so every expiry needs a new " +
+	"`jiku login`. Enable the \"Refresh Token\" grant type on the Native app in Zitadel, " +
+	"next to \"Device Code\", then run `jiku login` once more."
 
 // Subject is the `sub` of the logged-in person.
 func (d *DeviceFlow) Subject(ctx context.Context) (string, error) {

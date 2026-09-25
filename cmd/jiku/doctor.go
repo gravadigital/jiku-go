@@ -187,7 +187,7 @@ func tokenCheck(ctx context.Context, cfg jiku.Config, report func(checkResult)) 
 	claims, err := cs.Claims(ctx)
 	if err != nil {
 		fix := err.Error()
-		if errors.Is(err, auth.ErrLoginRequired) {
+		if errors.Is(err, auth.ErrLoginRequired) && !strings.Contains(fix, "hint:") {
 			fix = "No usable token is stored.\n  Run:  jiku login"
 		}
 		report(checkResult{name: "token", detail: "could not obtain an access token", fix: fix})
@@ -209,9 +209,25 @@ func tokenCheck(ctx context.Context, cfg jiku.Config, report func(checkResult)) 
 
 	left := time.Until(time.Unix(claims.Exp, 0)).Round(time.Second)
 	report(checkResult{name: "token", ok: true, detail: fmt.Sprintf(
-		"sub=%s roles=%s\n             valid for %s",
-		claims.Sub, strings.Join(roles, ","), left)})
+		"sub=%s roles=%s\n             valid for %s%s",
+		claims.Sub, strings.Join(roles, ","), left, refreshNote(cfg))})
 	return claims, nil
+}
+
+// refreshNote warns, without failing the check, when a person's session cannot renew itself.
+// Everything works today; tomorrow the token expires and the only symptom is `jiku login` again,
+// so the place to say why is the check that is already looking at the token.
+func refreshNote(cfg jiku.Config) string {
+	if cfg.Zitadel.KeyFile != "" {
+		return "" // a service user mints; it has no refresh token by design
+	}
+	tokens, err := auth.DefaultStore(cfg.Instance).Load()
+	if err != nil || tokens.AccessToken == "" || tokens.RefreshToken != "" {
+		return ""
+	}
+	return "\n             no refresh token: you will be asked to log in again when it expires.\n" +
+		"             Enable the \"Refresh Token\" grant type on the Native app in Zitadel,\n" +
+		"             next to \"Device Code\", then run: jiku login"
 }
 
 // rolesExemptNotGranting are the roles that grant BUS access while authorising nothing in core

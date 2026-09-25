@@ -743,6 +743,12 @@ renewed token **without the roles claim**, which connects to nothing. Zitadel al
 refresh token on every use**, so the new one must be kept — and when a response carries none, the
 previous one is preserved rather than dropped.
 
+**[contract] A refresh token only exists if the app has the Refresh Token grant.** Requesting
+`offline_access` is necessary and not sufficient: on a Native app with only Device Code, Zitadel
+drops the scope without an error and answers with an access token alone. The login succeeds, and
+the failure arrives when that token expires. A port should check for a refresh token right after
+`Login` and say so then, while the cause is still one step away.
+
 ### Discovering the provider's endpoints
 
 ```go

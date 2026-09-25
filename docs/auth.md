@@ -401,6 +401,7 @@ missing-row failure described above for anyone who executes a command.
 
 | Symptom | Link | Cause |
 |---|---|---|
+| `jiku login` asked for again every day | 2 | the Native app lacks the **Refresh Token** grant, so Zitadel issues no refresh token |
 | `Authorization Violation` on connect | 2–3 | no roles claim (set `project_id`), a role with no rule, or an opaque (non-JWT) machine token |
 | `Permissions Violation` on publish | 3 | your role's template does not grant that subject — usually a person on the command plane |
 | Request times out, connection fine | 4 | wrong inbox prefix, wrong `instance`, or core not subscribed |

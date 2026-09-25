@@ -119,7 +119,7 @@ catch-all rule. Omit it and you connect to nothing.
 ```go
 src, err := auth.NewDeviceFlow(auth.DeviceConfig{
     Issuer:    "https://id.grava.io",
-    ClientID:  "385696162499330050@gestor_de_proyectos",   // Native app, Device Code grant
+    ClientID:  "385696162499330050@gestor_de_proyectos",   // Native app, Device Code + Refresh Token grants
     ProjectID: "275672248377933829",
     Store:     auth.DefaultStore("dev"),                   // ~/.config/jiku/tokens-dev.json, 0600
 })

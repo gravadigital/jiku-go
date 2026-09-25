@@ -52,7 +52,7 @@ jiku config init
 
 # 2. Fill in three things (see Configuration below):
 #      creds              path to the sentinel .creds file
-#      zitadel.client_id  a Native Zitadel app with the Device Code grant
+#      zitadel.client_id  a Native Zitadel app with the Device Code and Refresh Token grants
 #      zitadel.project_id the Zitadel project — this is what puts ROLES in your token
 
 # 3. Log in (opens a browser once; tokens are cached and refreshed silently)
@@ -375,7 +375,7 @@ Resolved **flag > environment > file > default**.
 | `creds` | `JIKU_CREDS` | path to the sentinel `.creds` file |
 | `timeout` | `JIKU_TIMEOUT` | per-request timeout (keep it above 10s) |
 | `zitadel.issuer` | `JIKU_ISSUER` | e.g. `https://id.grava.io` |
-| `zitadel.client_id` | `JIKU_CLIENT_ID` | Native app with the Device Code grant, for `jiku login` |
+| `zitadel.client_id` | `JIKU_CLIENT_ID` | Native app with the Device Code and Refresh Token grants, for `jiku login` |
 | `zitadel.project_id` | `JIKU_PROJECT_ID` | **this is what puts roles in your token** |
 | `zitadel.key_file` | `JIKU_KEY_FILE` | service account key, for unattended use |
 
@@ -400,6 +400,11 @@ place; `jiku doctor` tells you when one is missing or unreadable.
 
 The device authorization grant (RFC 8628). You approve once in a browser; tokens are cached at
 `~/.config/jiku/tokens-<instance>.json` (mode `0600`) and refreshed silently.
+
+Silently only if Zitadel hands out a refresh token, and it does that only when the Native app has
+the **Refresh Token** grant type enabled next to Device Code. Without it `offline_access` is
+ignored without a word, and you are asked to log in again each time the token expires (about once
+a day). `jiku login` and `jiku doctor` both say so when the stored session has no refresh token.
 
 ### As a service — a key file
 

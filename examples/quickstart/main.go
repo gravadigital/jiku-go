@@ -11,7 +11,7 @@
 //	JIKU_INSTANCE    dev
 //	JIKU_CREDS       /path/to/sentinel-client.creds
 //	JIKU_ISSUER      https://id.grava.io
-//	JIKU_CLIENT_ID   <native app with the Device Code grant>
+//	JIKU_CLIENT_ID   <native app with the Device Code and Refresh Token grants>
 //	JIKU_PROJECT_ID  <zitadel project id>
 package main
 

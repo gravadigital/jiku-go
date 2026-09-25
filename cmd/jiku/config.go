@@ -53,7 +53,8 @@ zitadel:
   # The Zitadel instance.
   issuer: https://id.grava.io
 
-  # Client id of a NATIVE app with the "Device Code" grant enabled. Used by "jiku login".
+  # Client id of a NATIVE app with the "Device Code" and "Refresh Token" grants enabled.
+  # Used by "jiku login". Without "Refresh Token" you log in again every time the token expires.
   client_id: ""
 
   # The Zitadel project id.

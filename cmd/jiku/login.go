@@ -87,6 +87,9 @@ no login is needed at all: the key mints a token whenever one is wanted.`,
 						"           Set project_id and log in again.\n")
 			}
 			fmt.Fprintf(os.Stderr, "  expires  %s\n", tokens.Expiry().Format("2006-01-02 15:04:05"))
+			if tokens.RefreshToken == "" {
+				fmt.Fprint(os.Stderr, noRefreshTokenWarning)
+			}
 			fmt.Fprintf(os.Stderr, "  stored   %s\n\nNext: jiku doctor\n", store.Location())
 			return nil
 		},
@@ -94,6 +97,12 @@ no login is needed at all: the key mints a token whenever one is wanted.`,
 	cmd.Flags().BoolVar(&noBrowser, "no-browser", false, "do not try to open a browser")
 	return cmd
 }
+
+// noRefreshTokenWarning is said at login, while the cause is still one step away, rather than
+// twenty hours later when the token expires and the only symptom is being asked to log in again.
+const noRefreshTokenWarning = "  refresh  (none) — Zitadel issued no refresh token, so you will have to log in\n" +
+	"           again when this token expires. Enable the \"Refresh Token\" grant type on\n" +
+	"           the Native app in Zitadel, next to \"Device Code\", then log in again.\n"
 
 func newLogoutCmd() *cobra.Command {
 	return &cobra.Command{

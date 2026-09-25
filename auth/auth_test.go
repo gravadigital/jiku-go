@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -378,6 +379,27 @@ func TestDeviceFlowTokenNeverBlocksOnAHuman(t *testing.T) {
 	}
 	if !contains(err.Error(), "jiku login") {
 		t.Errorf("the error does not say what to run: %v", err)
+	}
+}
+
+// TestDeviceFlowNamesAMissingRefreshToken: a session stored without a refresh token expires
+// into "run jiku login", and logging in again only restarts the clock. The cause is a grant
+// missing on the Zitadel app, so the error has to say so — otherwise it is a login a day with
+// nothing pointing at why.
+func TestDeviceFlowNamesAMissingRefreshToken(t *testing.T) {
+	stale := jwt(t, map[string]any{"sub": "42", "exp": time.Now().Add(-time.Minute).Unix()})
+	flow, err := NewDeviceFlow(DeviceConfig{
+		Issuer: "https://x", ClientID: "c", Store: &MemoryStore{Tokens: Tokens{AccessToken: stale}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = flow.Token(testContext())
+	if !errors.Is(err, ErrLoginRequired) {
+		t.Fatalf("want ErrLoginRequired, got %v", err)
+	}
+	if !contains(err.Error(), "Refresh Token") {
+		t.Errorf("the error does not name the missing grant: %v", err)
 	}
 }
 

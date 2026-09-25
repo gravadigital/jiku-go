@@ -9,6 +9,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **A session that could never be renewed was reported as one that had simply expired.** Zitadel
+  issues a refresh token only when the Native app has the **Refresh Token** grant type; without
+  it `offline_access` is dropped silently, the login succeeds, and about twenty hours later
+  every command answers "run `jiku login`" — once a day, with nothing pointing at the app's
+  configuration. Three places now name the missing grant: `jiku login` right after
+  authenticating, `jiku doctor` in its token check, and `DeviceFlow.Token` when a stored token
+  expires with no refresh token behind it (still `ErrLoginRequired`, so `errors.Is` callers are
+  unaffected). The docs that listed only the Device Code grant now list both.
+
 - **`Iterator` silently truncated a sweep at an empty page that still carried a cursor.** The
   end of a collection is signalled by the ABSENCE of a cursor and by nothing else, but `fetch`
   also stopped whenever a page came back with no items. Those are different answers: the byte

@@ -72,7 +72,8 @@ type Config struct {
 type ZitadelConfig struct {
 	// Issuer is the Zitadel instance, e.g. https://id.grava.io.
 	Issuer string `yaml:"issuer"`
-	// ClientID of a Native app with the Device Code grant, for `jiku login`.
+	// ClientID of a Native app with the Device Code and Refresh Token grants, for
+	// `jiku login`.
 	ClientID string `yaml:"client_id"`
 	// ProjectID is the Zitadel project. It is what puts the ROLES in the token, and the
 	// callout reads the role to decide what you may do — so a token minted without it
