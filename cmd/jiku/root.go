@@ -32,6 +32,8 @@ type globals struct {
 	projectID  string
 	output     string
 	quiet      bool
+	debug      bool
+	timing     string
 }
 
 var g globals
@@ -51,6 +53,9 @@ Getting started
   3. jiku describe   see what the API actually serves, straight from the server
   4. jiku query tasks.list --filter projectId=15
 
+Each invocation opens its own connection, which costs a token and about 2.5 round trips. For
+several queries in a row, "jiku batch" runs them all over one connection.
+
 Configuration is resolved flag > environment > file > default. The file lives at
 ~/.config/jiku/config.yaml; run "jiku config init" to write a commented one.
 
@@ -59,6 +64,15 @@ Everything here is also a Go library:
     import "github.com/gravadigital/jiku-go"`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			if !cmd.Flags().Changed("debug") && os.Getenv(envDebug) != "" {
+				g.debug = os.Getenv(envDebug) != "0"
+			}
+			if !cmd.Flags().Changed("timing") {
+				g.timing = os.Getenv(envTiming)
+			}
+			return tl.configure(g.debug, g.timing)
+		},
 	}
 
 	pf := cmd.PersistentFlags()
@@ -73,6 +87,9 @@ Everything here is also a Go library:
 	pf.StringVar(&g.projectID, "project-id", "", "Zitadel project id; this is what puts ROLES in the token ($JIKU_PROJECT_ID)")
 	pf.StringVarP(&g.output, "output", "o", "json", `output format: "json", "raw" or "table"`)
 	pf.BoolVarP(&g.quiet, "quiet", "q", false, "suppress progress on stderr")
+	pf.BoolVar(&g.debug, "debug", false, "log every step and how long it took, on stderr ($JIKU_DEBUG)")
+	pf.StringVar(&g.timing, "timing", "", `print where the time went, on stderr: "text" or "json" ($JIKU_TIMING)`)
+	pf.Lookup("timing").NoOptDefVal = "text"
 
 	cmd.AddCommand(
 		newLoginCmd(),
@@ -81,6 +98,7 @@ Everything here is also a Go library:
 		newDoctorCmd(),
 		newDescribeCmd(),
 		newQueryCmd(),
+		newBatchCmd(),
 		newCommandCmd(),
 		newEventsCmd(),
 		newRawCmd(),
@@ -89,8 +107,15 @@ Everything here is also a Go library:
 	return cmd
 }
 
+// The debug switches are CLI-only: a library caller sets Config.Logger and Config.Trace.
+const (
+	envDebug  = "JIKU_DEBUG"
+	envTiming = "JIKU_TIMING"
+)
+
 // loadConfig resolves the configuration from all four sources and attaches a token source.
 func loadConfig() (jiku.Config, error) {
+	defer tl.phase("config")()
 	cfg, err := jiku.LoadConfig(g.configPath)
 	if err != nil {
 		return cfg, err
@@ -112,6 +137,7 @@ func loadConfig() (jiku.Config, error) {
 		return cfg, err
 	}
 	cfg.Auth = src
+	tl.attach(&cfg)
 	return cfg, nil
 }
 
@@ -128,10 +154,13 @@ func overrideStr(dest *string, v string) {
 // cannot be renewed without a human.
 func tokenSource(cfg jiku.Config) (auth.TokenSource, error) {
 	if cfg.Zitadel.KeyFile != "" {
+		// The store is what keeps a one-shot CLI invocation from minting a token against
+		// Zitadel every single time, which costs more than the query it is about to run.
 		return auth.NewServiceUser(auth.ServiceUserConfig{
 			Issuer:    cfg.Zitadel.Issuer,
 			KeyFile:   cfg.Zitadel.KeyFile,
 			ProjectID: cfg.Zitadel.ProjectID,
+			Store:     auth.DefaultServiceStore(cfg.Instance),
 		})
 	}
 	if cfg.Zitadel.ClientID == "" {
@@ -156,7 +185,17 @@ func connect(ctx context.Context) (*jiku.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return jiku.Connect(ctx, cfg)
+	end := tl.phase("connect")
+	client, err := jiku.Connect(ctx, cfg)
+	end()
+	tl.connected(client)
+	return client, err
+}
+
+// closeClient closes the connection as a timed phase of its own.
+func closeClient(client *jiku.Client) {
+	defer tl.phase("close")()
+	client.Close()
 }
 
 // signalContext cancels on SIGINT/SIGTERM so a long `--all` sweep stops promptly.

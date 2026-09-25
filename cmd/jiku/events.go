@@ -113,7 +113,7 @@ redelivery, but the field to deduplicate by is "event.eventId".`,
 			if err != nil {
 				return err
 			}
-			defer client.Close()
+			defer closeClient(client)
 
 			cons, err := events.New(client)
 			if err != nil {

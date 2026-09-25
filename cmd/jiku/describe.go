@@ -43,7 +43,7 @@ than was asked for.
 			if err != nil {
 				return err
 			}
-			defer client.Close()
+			defer closeClient(client)
 
 			contract, err := client.Describe(ctx, args...)
 			if err != nil {

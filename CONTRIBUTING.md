@@ -46,6 +46,7 @@ so `make tag` refuses the mistakes that cannot be undone.
 /cmd/jiku/         the CLI, a thin shell over the library
 /docs/            protocol, auth, library and command-reference guides
 /tools/gendocs/   regenerates docs/commands.md from Jiku's own contract — never hand-edit it
+/tools/bench/     measures where a query's time goes, against a local stack only
 /examples/        runnable programs
 /testdata/        real server replies, used as fixtures
 /.local/          git-ignored; where local credentials go

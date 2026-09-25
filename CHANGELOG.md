@@ -5,6 +5,76 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) as scoped by the
 [compatibility policy](README.md#compatibility).
 
+## [Unreleased]
+
+Performance work, from a baseline measured against a local stack. A CLI command took ~1.4 s
+against a local bus, of which the query itself was ~5 ms; the rest was authentication, the
+connection and a contract fetch, all paid on every invocation.
+
+### Added
+
+- **`jiku batch`** — reads one request per line from stdin and answers NDJSON over a **single**
+  connection. Connecting costs a token and roughly 2.5 round trips, which `jiku query` pays per
+  invocation; a script running twenty queries now pays it once. A failing request does not stop
+  the batch (`--stop-on-error` if it should) and the exit status reports whether any failed.
+- **`Client.ListInto`** — runs a `{resource}.list` and decodes the items straight into a
+  destination, returning only the page. Same request as `List`, with the envelope and the items
+  decoded in a single pass: 41–66 % less decoding time than the route through `List` and `Into`,
+  and on a 250 KB page into structs a fifteenth of the memory allocated.
+- **`ServiceUserConfig.Store`** — optional persistence for a service user's minted access token,
+  with `auth.DefaultServiceStore`. **Off by default**: a long-lived service wants its token in
+  memory, and writing a credential where nobody asked for one is a surprise. The CLI opts in,
+  which is what stops it minting a fresh token against Zitadel on every command.
+- **`auth.ForgetDiscovery`** and `auth.DiscoveryTTL` — the escape hatch and the lifetime for the
+  new on-disk discovery cache.
+- **`Config.Trace`, `RequestTrace`, `ConnectTrace` and `Client.ConnectTiming`** — a per-request
+  timing hook. **Nil by default, and a client without it sends exactly what it sent before**:
+  the tracing headers are attached only when a hook is present.
+- **`Config.Logger`** — a `*slog.Logger` for debug logs of every step and how long it took.
+  Nil by default; at a level above debug it logs nothing and sends nothing extra. At debug it
+  times every request and attaches the same tracing headers `Trace` does.
+- **`auth.WithTrace`, `auth.TokenTrace`, `auth.HTTPTrace` and `auth.TokenOrigin`** — where a
+  token came from (memory, store, minted, refreshed) and, for one fetched from Zitadel,
+  discovery, signing and the exchange, with each HTTPS request split into DNS, TCP, TLS and
+  wait. `ConnectTrace.Auth` carries it for `Connect`. A token from memory and one minted at
+  Zitadel differ by three orders of magnitude and looked identical from outside.
+- **`RequestTrace.Unwrap`, `Total` and `ErrorCode`** — the second decoding pass (the
+  `Collection` of `List`; `ListInto`, `Describe` and `Tags` decode with the envelope), the whole
+  call, and the failure code.
+- **`jiku --timing` and `--debug`** (`$JIKU_TIMING`, `$JIKU_DEBUG`) — where one invocation spent
+  its time, per phase: config, connect with the token step broken down, contract, each request
+  with core's share, output, close. `--timing=json` for tools. Off by default, and off means
+  the client is configured exactly as before.
+- **`tools/bench`** — measures the library per request, the CLI per phase and connect per token
+  state, against a local stack only; it refuses any server that is not on localhost.
+
+### Changed
+
+- **The OIDC discovery document is cached on disk** for 24 h, not just memoised per process, so
+  a one-shot CLI invocation no longer pays a full HTTPS handshake to learn URLs that have not
+  moved. A mint that fails against cached endpoints re-fetches them once and retries, so a
+  deployment that moves an endpoint is not a day-long outage.
+- **`jiku query` fetches the contract only when a flag needs it** — `--filter`, `--sort`,
+  `--fields` or `--include`. `jiku query tasks.get --id 7` names nothing to validate and no
+  longer spends a round trip and 18 KB fetching the contract to check nothing. Validation and
+  the typing of filter values are unchanged wherever they applied before.
+- **`Collection.Into` decodes in one pass** for a collection that came off the wire, instead of
+  re-encoding `Items` and decoding the result. `Client.All` and the CLI's output path join the
+  raw items rather than re-encoding them, which matters most on an `--all` sweep where the cost
+  was paid per page. `Items` is unchanged, and a `Collection` built by hand still works; one
+  whose `Items` was filtered in place still decodes what `Items` says.
+- **`-o json` re-indents the reply as it arrived** instead of decoding it and encoding it again.
+  Visible in two ways: keys now come in the **server's order** — which follows the resource
+  sheet, as `-o table` columns already did — rather than alphabetically, and an integer past
+  2^53 is printed as sent instead of rounded through `float64` (`9007199254740993` used to print
+  as `...992`). About five times cheaper on a large page: 8.5 → 1.7 ms at 250 KB.
+- **`-o table` is buffered.** `tabwriter` pads eight bytes per write, so a wide column written
+  straight to stdout was a syscall per eight spaces: one 200-row page with includes was 1.3
+  million writes and 880 ms. Now 60 ms.
+- **`Describe` and `Tags` decode in one pass**, like `ListInto`.
+- **`jiku logout` removes the service user's cached token too**, not only the device flow's.
+  Leaving it behind would have made `logout` a no-op for a machine user.
+
 ## [1.1.0] - 2026-09-14
 
 ### Added

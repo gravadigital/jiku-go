@@ -3,6 +3,7 @@ package jiku
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 )
 
 // Iterator walks every page of a list, following cursors.
@@ -111,6 +112,10 @@ func (it *Iterator) Count() int { return it.seen }
 //
 // Convenient and dangerous in the same way: it holds the whole collection in memory and issues
 // as many requests as it takes. Use Iterate for anything that might be large.
+//
+// The items are joined into one JSON array and decoded once, rather than re-encoded element by
+// element: this walks every page of a collection, so the per-item cost is multiplied by the
+// whole sweep rather than by one page.
 func (c *Client) All(ctx context.Context, resource string, q List, dest any) error {
 	var raw []json.RawMessage
 	it := c.Iterate(ctx, resource, q)
@@ -120,5 +125,32 @@ func (c *Client) All(ctx context.Context, resource string, q List, dest any) err
 	if err := it.Err(); err != nil {
 		return err
 	}
-	return Collection{Items: raw}.Into(dest)
+	if err := json.Unmarshal(joinRawArray(raw), dest); err != nil {
+		return fmt.Errorf("jiku: decoding items into %T: %w", dest, err)
+	}
+	return nil
+}
+
+// joinRawArray concatenates already-encoded items into one JSON array.
+//
+// The elements are raw JSON that came off the wire, so they need no re-encoding — only commas
+// and brackets around them. json.Marshal would decode and re-encode each one to produce the
+// same bytes.
+func joinRawArray(items []json.RawMessage) []byte {
+	if len(items) == 0 {
+		return []byte("[]")
+	}
+	n := 2 + len(items) - 1
+	for _, it := range items {
+		n += len(it)
+	}
+	out := make([]byte, 0, n)
+	out = append(out, '[')
+	for i, it := range items {
+		if i > 0 {
+			out = append(out, ',')
+		}
+		out = append(out, it...)
+	}
+	return append(out, ']')
 }
