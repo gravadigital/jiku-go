@@ -2,6 +2,7 @@ package jiku
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,6 +54,14 @@ type Config struct {
 	// carries the Jiku-Sent-At and Jiku-Trace-Id headers so core can time the inbound leg.
 	// Nil — the default — sends exactly what an untraced client sends.
 	Trace func(RequestTrace) `yaml:"-"`
+
+	// Logger receives debug logs of what the client does and how long each step took: the
+	// connect broken down (token origin, discovery, the HTTPS exchange with Zitadel, the dial),
+	// every request, reconnects. Nil — the default — logs nothing.
+	//
+	// A logger enabled for debug also times every request, so it attaches the same tracing
+	// headers Trace does: core's own breakdown is half of what makes a slow request readable.
+	Logger *slog.Logger `yaml:"-"`
 
 	// Zitadel holds the identity provider settings the CLI needs to obtain a token. A
 	// library caller that builds its own Auth can ignore this entirely.

@@ -12,7 +12,10 @@ import (
 )
 
 func main() {
-	if err := newRootCmd().Execute(); err != nil {
+	err := newRootCmd().Execute()
+	// After the command, error or not: a slow failure is exactly when the timing is wanted.
+	tl.report(os.Stderr)
+	if err != nil {
 		// Cobra has already printed usage errors; anything else is ours to report.
 		var silent silentError
 		if !errors.As(err, &silent) {

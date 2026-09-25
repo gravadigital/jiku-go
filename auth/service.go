@@ -180,21 +180,31 @@ func (s *ServiceUser) StoreKey() string {
 // The order is memory, then Store if one is configured, then Zitadel. A stored token that was
 // minted for different credentials is ignored — see StoreKey.
 func (s *ServiceUser) Token(ctx context.Context) (string, error) {
+	ctx, tr := startTrace(ctx)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.tokens.Valid() {
+		tr.finish(OriginMemory, nil)
 		return s.tokens.AccessToken, nil
 	}
-	if s.loadStored() {
+	storeStart := time.Now()
+	stored := s.loadStored()
+	if s.cfg.Store != nil {
+		tr.set(func(t *TokenTrace) { t.Store = time.Since(storeStart) })
+	}
+	if stored {
+		tr.finish(OriginStore, nil)
 		return s.tokens.AccessToken, nil
 	}
 	tokens, err := s.mint(ctx, false)
 	if err != nil {
+		tr.finish(OriginMinted, err)
 		return "", err
 	}
 	s.tokens = tokens
 	s.saveStored(tokens)
+	tr.finish(OriginMinted, nil)
 	return tokens.AccessToken, nil
 }
 
@@ -206,19 +216,24 @@ func (s *ServiceUser) Token(ctx context.Context) (string, error) {
 // once against a freshly fetched one — and only once, and only when the document was cached:
 // a real outage must still surface as an error rather than as two of them.
 func (s *ServiceUser) mint(ctx context.Context, refreshed bool) (Tokens, error) {
+	tr := tracerFrom(ctx)
 	disc, cached, err := discover(ctx, s.cfg.HTTPClient, s.cfg.Issuer)
 	if err != nil {
 		return Tokens{}, err
 	}
+	signStart := time.Now()
 	assertion, err := s.assertion()
 	if err != nil {
 		return Tokens{}, err
 	}
+	tr.set(func(t *TokenTrace) { t.Sign += time.Since(signStart) })
+	exchangeStart := time.Now()
 	tokens, err := postForm(ctx, s.cfg.HTTPClient, disc.TokenEndpoint, url.Values{
 		"grant_type": {"urn:ietf:params:oauth:grant-type:jwt-bearer"},
 		"assertion":  {assertion},
 		"scope":      {s.scopes()},
 	})
+	tr.set(func(t *TokenTrace) { t.Exchange += time.Since(exchangeStart) })
 	if err == nil {
 		return tokens, nil
 	}

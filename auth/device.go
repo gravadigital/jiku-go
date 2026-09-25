@@ -118,23 +118,40 @@ func (d *DeviceFlow) scopes() string {
 // starts an interactive flow — that is Login's job — and returns ErrLoginRequired instead, so
 // a service can never be surprised by a call that blocks on a human.
 func (d *DeviceFlow) Token(ctx context.Context) (string, error) {
+	ctx, tr := startTrace(ctx)
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if err := d.load(); err != nil {
+	origin := OriginMemory
+	if !d.loaded && d.cfg.Store != nil {
+		origin = OriginStore
+	}
+	storeStart := time.Now()
+	err := d.load()
+	if origin == OriginStore {
+		tr.set(func(t *TokenTrace) { t.Store = time.Since(storeStart) })
+	}
+	if err != nil {
+		tr.finish(origin, err)
 		return "", err
 	}
 	if d.tokens.Valid() {
+		tr.finish(origin, nil)
 		return d.tokens.AccessToken, nil
 	}
 	if d.tokens.RefreshToken != "" {
-		if err := d.refresh(ctx); err == nil {
+		err := d.refresh(ctx)
+		tr.finish(OriginRefreshed, err)
+		if err == nil {
 			return d.tokens.AccessToken, nil
 		} else if !errors.Is(err, ErrLoginRequired) {
 			return "", err
 		}
+		return "", fmt.Errorf("%w: run `jiku login`", ErrLoginRequired)
 	}
-	return "", fmt.Errorf("%w: run `jiku login`", ErrLoginRequired)
+	err = fmt.Errorf("%w: run `jiku login`", ErrLoginRequired)
+	tr.finish(origin, err)
+	return "", err
 }
 
 // Subject is the `sub` of the logged-in person.
@@ -291,6 +308,8 @@ func (d *DeviceFlow) refresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	exchangeStart := time.Now()
+	defer tracerFrom(ctx).set(func(t *TokenTrace) { t.Exchange += time.Since(exchangeStart) })
 	tokens, err := postForm(ctx, d.cfg.HTTPClient, disc.TokenEndpoint, url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {d.tokens.RefreshToken},

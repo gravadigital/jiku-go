@@ -168,8 +168,8 @@ answer for every command within a role — see [Who can do what](#who-can-do-wha
 
 ### Output
 
-`-o json` (default), `-o table` for reading, `-o raw` for byte-level comparison with the `nats`
-CLI. Pagination and progress go to **stderr**, so stdout stays a clean array:
+`-o json` (default) is the reply indented as the server sent it, key order and all; `-o table`
+for reading, `-o raw` for byte-level comparison with the `nats` CLI. Pagination and progress go to **stderr**, so stdout stays a clean array:
 
 ```bash
 jiku query tasks.list --all -o json | jq '[.[] | select(.state=="activo")] | length'
@@ -191,6 +191,24 @@ $ jiku batch < queries.ndjson | jq -c '{id, n: (.data.items|length)}'
 One NDJSON reply per request, in order, each with either `data` or an `error` carrying the code.
 A failing request does not stop the batch — pass `--stop-on-error` if it should — and the exit
 status is non-zero if any failed.
+
+### Where the time went
+
+`--timing` prints, after the command, how long each phase took — config, connect (with the
+token step broken down: from memory, from disk, or minted at Zitadel, with DNS/TCP/TLS of the
+HTTPS exchange), contract, each request with core's own share when core reports it, output and
+close. `--timing=json` prints the same as one JSON line, for tools. `--debug` logs every step as
+it happens. Both go to **stderr**, and both are also `$JIKU_TIMING` and `$JIKU_DEBUG`.
+
+```bash
+$ jiku query tasks.get --id 1368 --timing -o raw >/dev/null
+timing
+  config       0.53ms
+  connect      4.64ms   token 0.14ms (store, store 0.13ms)
+                        dial 4.50ms (tcp + nats handshake + auth-callout)
+  request      2.62ms
+  ...
+```
 
 ### The escape hatch
 
@@ -556,9 +574,11 @@ help carries the same explanations as these documents.
 ```
 /                 package jiku — the library. Its import path IS the module path.
 /auth/            token sources: the device flow and service users
+/events/          package events — the JetStream domain event plane (opt-in)
 /cmd/jiku/         the CLI, a thin shell over the library
 /docs/            protocol, auth, library and command-reference guides
 /tools/gendocs/   regenerates docs/commands.md from Jiku's own contract — never hand-edit it
+/tools/bench/     measures where a query's time goes, against a local stack only
 /examples/        runnable programs
 /testdata/        real server replies, used as fixtures
 ```
@@ -586,6 +606,10 @@ Tests need **no network and no bus**. The contract-decoding tests run against a 
 `meta.describe` reply** saved in `testdata/`, and the inbox-hash test pins values observed from a
 running auth-callout — both are regression tests for bugs found by comparing this client against
 the live system rather than against the specs.
+
+`tools/bench` measures where a query's time goes — per request in the library, per phase in the
+CLI, and connect in each token state — against a **local** stack only: it reads the CLI's config
+(point `JIKU_CONFIG_DIR` at one for a local bus) and refuses any server that is not on localhost.
 
 `make ci` runs the tests under the **race detector**, because this package documents `Client` and
 the token sources as safe for concurrent use and nats.go calls the token handler and the async

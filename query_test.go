@@ -1,7 +1,9 @@
 package jiku
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -171,11 +173,17 @@ func TestJoinRawArrayMatchesMarshal(t *testing.T) {
 	}
 }
 
+// envelope wraps a list reply's data in a success envelope, as core sends it.
+func envelope(data []byte) []byte {
+	return append(append([]byte(`{"status":"success","data":`), data...), '}')
+}
+
 // TestListIntoDecodesTheSameAsCollectionInto pins ListInto against the route it shortcuts.
 //
-// ListInto skips Collection entirely, so the two could drift apart without either being
-// obviously wrong. They decode the same bytes and must produce the same values and the same
-// page.
+// ListInto decodes envelope and items in one pass and skips Collection entirely, so the two
+// could drift apart without either being obviously wrong. They decode the same bytes and must
+// produce the same values and the same page — including an id past 2^53, which a decode through
+// float64 anywhere on the way would corrupt.
 func TestListIntoDecodesTheSameAsCollectionInto(t *testing.T) {
 	body := listReply(
 		`{"id":9007199254740993,"title":"big"}`,
@@ -191,24 +199,96 @@ func TestListIntoDecodesTheSameAsCollectionInto(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The shape ListInto decodes, without a Client and therefore without a bus.
-	var reply struct {
-		Items json.RawMessage `json:"items"`
-		Page  Page            `json:"page"`
-	}
-	if err := json.Unmarshal(body, &reply); err != nil {
-		t.Fatal(err)
-	}
 	var direct []testTask
-	if err := json.Unmarshal(reply.Items, &direct); err != nil {
+	var page Page
+	if _, err := decodeInto("tasks.list", envelope(body), listDest(&direct, &page)); err != nil {
 		t.Fatal(err)
 	}
 
 	if !reflect.DeepEqual(direct, viaCollection) {
 		t.Errorf("ListInto shape = %+v, Collection.Into = %+v", direct, viaCollection)
 	}
-	if !reflect.DeepEqual(reply.Page, col.Page) {
-		t.Errorf("page %+v != %+v", reply.Page, col.Page)
+	if !reflect.DeepEqual(page, col.Page) {
+		t.Errorf("page %+v != %+v", page, col.Page)
+	}
+}
+
+// TestDecodeIntoReportsTheFailureNotTheShape is the ordering that matters in one pass: a failure
+// envelope is the server's answer and must come back as its *Error, with its code, even though
+// the destination could not have been filled. Reporting a decode error instead would bury
+// invalid_fields — the error that names the fix — under a type complaint.
+func TestDecodeIntoReportsTheFailureNotTheShape(t *testing.T) {
+	body := []byte(`{"status":"failure","errorCode":"invalid_fields","errorMessage":"no",` +
+		`"errorDetails":{"field":"sort","value":"nope","allowed":["id"]},"data":{"items":"not an array"}}`)
+	var dest []testTask
+	var page Page
+	code, err := decodeInto("tasks.list", body, listDest(&dest, &page))
+	var jerr *Error
+	if !errors.As(err, &jerr) || jerr.Code != "invalid_fields" || code != "invalid_fields" {
+		t.Fatalf("err = %v (code %q), want the invalid_fields *Error", err, code)
+	}
+	if jerr.Details == nil || jerr.Details.Field != "sort" {
+		t.Errorf("details lost in the one-pass decode: %+v", jerr.Details)
+	}
+	if dest != nil {
+		t.Errorf("a failure filled the destination: %+v", dest)
+	}
+}
+
+// TestDecodeIntoTellsAShapeErrorFromABrokenEnvelope separates the caller's mistake — a type that
+// does not fit a reply that succeeded — from a reply that is not an envelope at all.
+func TestDecodeIntoTellsAShapeErrorFromABrokenEnvelope(t *testing.T) {
+	var wrong []struct {
+		ID string `json:"id"`
+	}
+	var page Page
+	_, err := decodeInto("tasks.list", envelope(listReply(`{"id":1}`)), listDest(&wrong, &page))
+	var shape *shapeError
+	if !errors.As(err, &shape) {
+		t.Errorf("a type mismatch on a success reply = %v, want a shapeError", err)
+	}
+
+	_, err = decodeInto("tasks.list", []byte(`<html>502</html>`), listDest(&wrong, &page))
+	if err == nil || errors.As(err, &shape) || !strings.Contains(err.Error(), "not an envelope") {
+		t.Errorf("a non-envelope = %v, want the not-an-envelope error", err)
+	}
+}
+
+// TestListIntoRefusesANonPointer covers what the nesting would otherwise hide: json.Unmarshal
+// refuses a non-pointer destination, but one held inside an interface is silently REPLACED by a
+// decoded map, and the caller's value never changes.
+func TestListIntoRefusesANonPointer(t *testing.T) {
+	// No connection: the destination has to be refused before anything is sent, so the error
+	// must be about the pointer and not ErrNotConnected.
+	c := &Client{}
+	var tasks []testTask
+	var nilPtr *[]testTask
+	for name, dest := range map[string]any{"by value": tasks, "nil pointer": nilPtr} {
+		_, err := c.ListInto(context.Background(), "tasks", List{}, dest)
+		if err == nil || !strings.Contains(err.Error(), "non-nil pointer") {
+			t.Errorf("%s: err = %v, want the destination refused", name, err)
+		}
+	}
+	if _, err := c.ListInto(context.Background(), "tasks", List{}, &tasks); !errors.Is(err, ErrNotConnected) {
+		t.Errorf("a pointer: err = %v, want it to get as far as the connection", err)
+	}
+}
+
+// TestListIntoLeavesTheDestinationAloneWithoutItems keeps the old contract: a reply with no
+// items, or items null, decodes nothing and is not an error.
+func TestListIntoLeavesTheDestinationAloneWithoutItems(t *testing.T) {
+	for _, data := range []string{`{"page":{"limit":5,"returned":0}}`, `{"items":null,"page":{"limit":5}}`} {
+		dest := []testTask{{ID: 7}}
+		var page Page
+		if _, err := decodeInto("tasks.list", envelope([]byte(data)), listDest(&dest, &page)); err != nil {
+			t.Errorf("%s: %v", data, err)
+		}
+		if len(dest) != 1 || dest[0].ID != 7 {
+			t.Errorf("%s: destination changed to %+v", data, dest)
+		}
+		if page.Limit != 5 {
+			t.Errorf("%s: page = %+v", data, page)
+		}
 	}
 }
 

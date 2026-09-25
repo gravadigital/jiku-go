@@ -182,9 +182,11 @@ var tasks []Task
 page, err := client.ListInto(ctx, "tasks", jiku.List{Limit: 50}, &tasks)
 ```
 
-It is the same request. The difference is the decoding: `List` + `Into` walks the reply twice,
-`ListInto` once. On a large page that is worth having — a 250 KB reply spends about 8 ms of its
-36 ms in decoding — and on a small one it does not matter. Use `List` when the items are to be
+It is the same request. The difference is the decoding: `ListInto` decodes the envelope and the
+items in a single pass, where `List` + `Into` walks the reply more than once. On a large page that
+is worth having — decoding a 250 KB page into structs takes about 2 ms this way and about three
+times that through `List` and `Into` — and on a small one it hardly matters. Structs also decode
+in half the time of `[]map[string]any`. Use `List` when the items are to be
 passed around as raw JSON, or when you need the page before deciding how to decode.
 
 ### One record
@@ -395,25 +397,48 @@ r.ForVariant("")        // the union of all of them
 
 ## Timing a request
 
-`Config.Trace` is called once per request with its breakdown. It is **off unless you set it**,
-and a client without it sends exactly what it would have sent otherwise — the headers below are
-only attached when a hook is present.
+Two opt-in hooks, both **off unless you set them**. A client with neither sends exactly what it
+would have sent otherwise.
+
+`Config.Logger` takes a `*slog.Logger` and, at debug level, logs each step with its duration: the
+connect broken down, every request, the token fetched for a reconnect, disconnects. At any other
+level it logs nothing and changes nothing, so handing the client your application's logger is
+safe.
+
+`Config.Trace` is called once per request with its breakdown, for callers that want the numbers
+as data rather than as log lines:
 
 ```go
+cfg.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 cfg.Trace = func(t jiku.RequestTrace) {
-    log.Printf("%s round=%s decode=%s bytes=%d", t.Method, t.RoundTrip, t.Decode, t.RespBytes)
+    log.Printf("%s total=%s round=%s decode=%s unwrap=%s bytes=%d",
+        t.Method, t.Total, t.RoundTrip, t.Decode, t.Unwrap, t.RespBytes)
 }
 client, err := jiku.Connect(ctx, cfg)
 
-fmt.Printf("%+v\n", client.ConnectTiming())   // Subject, Token, Dial, Total
+ct := client.ConnectTiming()          // Subject, Token, Dial, Total
+fmt.Println(ct.Auth.Origin)           // memory, store, minted or refreshed
 ```
 
-`RequestTrace` carries `Encode`, `RoundTrip` and `Decode`, the request and response sizes, and
-the error if the request failed. With a hook set, the request also carries `Jiku-Sent-At` and
-`Jiku-Trace-Id`; when core runs with its own timing enabled it answers `Jiku-Timing`, and
-`t.Server` is then its breakdown — `nil` when it is not. `Inbound` and `Outbound` are the two
-legs over the bus, and they only mean anything when core and the caller share a clock, which in
-practice means the same machine.
+`RequestTrace` carries `Encode`, `RoundTrip`, `Decode` (the envelope), `Unwrap` (the second pass
+that decodes `data` into `List`'s `Collection`; `ListInto`, `Describe` and `Tags` decode it with the
+envelope, so for them `Decode` covers both), `Total`, the sizes, the envelope's
+`ErrorCode` and the error if the request failed. With a hook set — or a logger enabled for debug
+— the request also carries `Jiku-Sent-At` and `Jiku-Trace-Id`; when core runs with its own timing
+enabled it answers `Jiku-Timing`, and `t.Server` is then its breakdown — `nil` when it is not.
+`Inbound` and `Outbound` are the two legs over the bus, and they only mean anything when core and
+the caller share a clock, which in practice means the same machine.
+
+`ConnectTrace.Auth` says where the token came from, and for a token fetched from Zitadel how long
+discovery, signing and the exchange took, with each HTTPS request split into DNS, TCP, TLS and
+the wait for the answer. It is what tells a slow connect caused by the identity provider from one
+caused by the bus. The same breakdown is available for any token source, outside `Connect`, with
+`auth.WithTrace`:
+
+```go
+ctx := auth.WithTrace(ctx, func(t auth.TokenTrace) { log.Printf("token: %+v", t) })
+tok, err := src.Token(ctx)
+```
 
 ---
 

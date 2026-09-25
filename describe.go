@@ -3,6 +3,7 @@ package jiku
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -200,20 +201,22 @@ type EnumValue struct {
 //
 // An EMPTY (non-nil) resources slice is invalid_fields on the server, not "all" — so nil and
 // empty are collapsed here to mean "all", which is what a caller passing no arguments means.
-func (c *Client) Describe(ctx context.Context, resources ...string) (*Contract, error) {
+func (c *Client) Describe(ctx context.Context, resources ...string) (contract *Contract, err error) {
 	payload := map[string]any{}
 	if len(resources) > 0 {
 		payload["resources"] = resources
 	}
-	data, err := c.Query(ctx, "meta.describe", payload)
+	contract = &Contract{}
+	trace, err := c.queryInto(ctx, "meta.describe", payload, contract)
+	defer func() { c.finishTrace(ctx, trace, err) }()
+	var shape *shapeError
+	if errors.As(err, &shape) {
+		return nil, fmt.Errorf("jiku: decoding the meta.describe reply: %w", shape.err)
+	}
 	if err != nil {
 		return nil, err
 	}
-	var contract Contract
-	if err := json.Unmarshal(data, &contract); err != nil {
-		return nil, fmt.Errorf("jiku: decoding the meta.describe reply: %w", err)
-	}
-	return &contract, nil
+	return contract, nil
 }
 
 // Contract returns the full contract, fetching it once per client and caching it.

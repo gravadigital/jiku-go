@@ -72,7 +72,7 @@ Values are typed from the contract: a filter on an integer column sends 15, not 
 			if err != nil {
 				return err
 			}
-			defer client.Close()
+			defer closeClient(client)
 
 			// A raw payload bypasses the flag surface entirely, for anything the flags
 			// cannot express yet.
@@ -94,7 +94,10 @@ Values are typed from the contract: a filter on an integer column sends 15, not 
 			// every invocation, so the per-client cache never amortises it.
 			var res jiku.Resource
 			if !noCheck && needsContract(filters, sortBy, fields, include) {
-				if contract, cErr := client.Contract(ctx); cErr == nil {
+				endContract := tl.phase("contract")
+				contract, cErr := client.Contract(ctx)
+				endContract()
+				if cErr == nil {
 					if r, rErr := contract.Resource(resource); rErr == nil {
 						// comments, activity and subscriptions keep their whitelists per
 						// variant. ForVariant("") unions them, which is the permissive and

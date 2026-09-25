@@ -72,7 +72,7 @@ not happen — there is nothing queued to land later.`,
 			if err != nil {
 				return err
 			}
-			defer client.Close()
+			defer closeClient(client)
 
 			data, err := client.Command(ctx, method, payload)
 			if err != nil {
@@ -157,7 +157,7 @@ inbox prefix is still set, because without those two nothing would answer at all
 			if err != nil {
 				return err
 			}
-			defer client.Close()
+			defer closeClient(client)
 
 			progressf("→ %s\n", jiku.Subject(client.Instance(), client.UserID(), service, method))
 

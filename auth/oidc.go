@@ -140,9 +140,16 @@ func discover(ctx context.Context, hc *http.Client, issuer string) (Discovery, b
 		return Discovery{}, false, fmt.Errorf("auth: no issuer configured")
 	}
 
+	tr := tracerFrom(ctx)
+	start := time.Now()
+	from := func(where string) {
+		tr.set(func(t *TokenTrace) { t.Discovery += time.Since(start); t.DiscoveryFrom = where })
+	}
+
 	discoveries.mu.Lock()
 	if d, ok := discoveries.seen[issuer]; ok {
 		discoveries.mu.Unlock()
+		from("memory")
 		return d, true, nil
 	}
 	discoveries.mu.Unlock()
@@ -151,21 +158,26 @@ func discover(ctx context.Context, hc *http.Client, issuer string) (Discovery, b
 		discoveries.mu.Lock()
 		discoveries.seen[issuer] = d
 		discoveries.mu.Unlock()
+		from("disk")
 		return d, true, nil
 	}
+	defer from("network")
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		issuer+"/.well-known/openid-configuration", nil)
 	if err != nil {
 		return Discovery{}, false, err
 	}
+	req, done := traceHTTP(req, "discovery")
 	resp, err := client(hc).Do(req)
 	if err != nil {
+		done(0, err)
 		return Discovery{}, false, fmt.Errorf("auth: reaching %s: %w", issuer, err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	done(resp.StatusCode, err)
 	if err != nil {
 		return Discovery{}, false, fmt.Errorf("auth: reading discovery: %w", err)
 	}
@@ -201,13 +213,16 @@ func postForm(ctx context.Context, hc *http.Client, endpoint string, form url.Va
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
+	req, done := traceHTTP(req, "token")
 	resp, err := client(hc).Do(req)
 	if err != nil {
+		done(0, err)
 		return Tokens{}, fmt.Errorf("auth: reaching the token endpoint: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	done(resp.StatusCode, err)
 	if err != nil {
 		return Tokens{}, fmt.Errorf("auth: reading the token response: %w", err)
 	}

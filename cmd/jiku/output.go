@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -18,6 +19,17 @@ import (
 //	raw   exactly what came off the bus, for byte-level comparison with `nats req`
 //	table aligned columns, for reading rather than piping
 func emit(w io.Writer, v any, raw json.RawMessage) error {
+	defer tl.phase("output")()
+	// Buffered because tabwriter writes padding eight bytes at a time: straight to stdout, one
+	// 200-row table with a wide column was 1.3 million write syscalls and half a second.
+	bw := bufio.NewWriterSize(w, 64<<10)
+	if err := emitTo(bw, v, raw); err != nil {
+		return err
+	}
+	return bw.Flush()
+}
+
+func emitTo(w io.Writer, v any, raw json.RawMessage) error {
 	switch g.output {
 	case "raw":
 		if raw != nil {
@@ -37,12 +49,17 @@ func emit(w io.Writer, v any, raw json.RawMessage) error {
 		enc.SetIndent("", "  ")
 		enc.SetEscapeHTML(false)
 		if raw != nil && v == nil {
-			var pretty any
-			if err := json.Unmarshal(raw, &pretty); err != nil {
+			// Re-indented as it arrived rather than decoded and re-encoded, which kept none of
+			// it: the server's key order is meaningful (see columnOrder), an id past 2^53 does
+			// not survive a trip through float64, and the round trip cost five times as much.
+			var pretty bytes.Buffer
+			if err := json.Indent(&pretty, bytes.TrimSpace(raw), "", "  "); err != nil {
 				_, err := fmt.Fprintln(w, string(raw))
 				return err
 			}
-			return enc.Encode(pretty)
+			pretty.WriteByte('\n')
+			_, err := w.Write(pretty.Bytes())
+			return err
 		}
 		return enc.Encode(v)
 	default:

@@ -78,7 +78,7 @@ allowed names in it.`,
 			if err != nil {
 				return err
 			}
-			defer client.Close()
+			defer closeClient(client)
 
 			return runBatch(ctx, client, os.Stdin, os.Stdout, stopOnError)
 		},
