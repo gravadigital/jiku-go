@@ -287,3 +287,43 @@ func jikuConfigFor(t *testing.T, clientID, keyFile string) jiku.Config {
 		},
 	}
 }
+
+// readValue has no default, unlike readPayload: an absent value stored as an empty one would
+// overwrite whatever the key held, silently.
+func TestReadValueSources(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "value.bin")
+	if err := os.WriteFile(file, []byte("from-file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name  string
+		args  []string
+		file  string
+		stdin string
+		want  string
+	}{
+		{"inline", []string{"k", "dark"}, "", "", "dark"},
+		{"an explicit empty value", []string{"k", ""}, "", "", ""},
+		{"file", []string{"k"}, file, "", "from-file"},
+		{"stdin", []string{"k", "-"}, "", "from-stdin", "from-stdin"},
+	}
+	for _, tc := range cases {
+		got, err := readValue(tc.args, tc.file, strings.NewReader(tc.stdin))
+		if err != nil {
+			t.Errorf("%s: %v", tc.name, err)
+			continue
+		}
+		if string(got) != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+
+	if _, err := readValue([]string{"k"}, "", strings.NewReader("")); err == nil {
+		t.Error("no value at all was accepted; it would store an empty one over the key")
+	}
+	if _, err := readValue([]string{"k", "dark"}, file, strings.NewReader("")); err == nil ||
+		!strings.Contains(err.Error(), "not both") {
+		t.Errorf("both inline and --value-file = %v, want an error saying to pass only one", err)
+	}
+}

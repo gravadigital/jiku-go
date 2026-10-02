@@ -5,6 +5,9 @@
 // different delivery guarantees. That plane lives in the events subpackage, which is opt-in:
 // importing this one costs nothing to a caller that never consumes events.
 //
+// Each identity also has its own space in a JetStream key-value bucket, for state and caches:
+// see Client.KV. Core takes no part in it.
+//
 // # Getting started
 //
 //	src, err := auth.NewServiceUser(auth.ServiceUserConfig{
@@ -83,6 +86,14 @@
 // both by the bus permission template and by core's own role map. Writes go through the api over
 // HTTP, because core does not hold the business rules that depend on the end user. Commands are
 // for service identities.
+//
+// # The key-value space
+//
+// Client.KV returns the caller's own space in the bucket KVBucket, with Put, Get and Delete. Keys
+// are stored as {instance}.{userID}.{key}, the identity being the second segment just as in a
+// request subject, and the space adds that prefix itself. The auth-callout grants each identity
+// its own prefix and nothing wider; RequiredKVPermissions prints the grants. Jiku's deployment
+// creates the bucket, and its limits are shared by every identity.
 //
 // # Errors
 //

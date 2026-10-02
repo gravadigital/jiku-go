@@ -7,6 +7,29 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **A key-value space per identity.** `Client.KV` binds the NATS key-value bucket `JIKU_KV` and
+  returns the caller's own space in it, with `Put`, `Get` and `Delete`. Keys are stored as
+  `{instance}.{userID}.{key}`: the identity is the second segment, as in every request subject,
+  and the space adds it, so a caller writes and reads only `{key}`. There is no version segment,
+  since this is storage and not a protocol. There are no `Keys`, `Watch` or history either:
+  each needs a consumer on the bucket, a wider grant than three exact subjects.
+
+  Isolation comes from the auth-callout, which must grant each identity its own prefix.
+  `RequiredKVPermissions` prints the three lines, and every permissions error from the space
+  includes them. A refused operation fails as soon as the violation lands, through the
+  client's existing permission tracking, which is why the space lives in the root package and
+  not beside `events`. `Get` is sent with the key in the subject. A bucket without
+  `allow_direct` is refused at bind: without it the read goes to a subject that takes the key in
+  the body, and the obvious fix, granting that subject, would open every identity's entries.
+
+  Jiku's deployment creates the bucket; this client never does. Its limits (value size, total
+  size, TTL) are the bucket's and shared by every identity: there is no per-identity quota.
+  New sentinels: `ErrKeyNotFound`, `ErrNoBucket`, `ErrValueTooLarge`, `ErrBucketFull`,
+  `ErrKVPermissions`. Also `KVBucket`, `KVKey` and `ValidKVKey`, the `jiku kv put|get|delete`
+  commands, and [docs/kv.md](docs/kv.md).
+
 ## [1.3.0] - 2026-09-25
 
 ### Fixed

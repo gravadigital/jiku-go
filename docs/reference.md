@@ -36,6 +36,7 @@ they are not listed again as identifiers.
 - [`jiku` — filters](#jiku--filters)
 - [`jiku` — errors](#jiku--errors)
 - [`jiku` — subjects](#jiku--subjects)
+- [`jiku` — the key-value space](#jiku--the-key-value-space)
 - [`jiku` — timing and tracing](#jiku--timing-and-tracing)
 - [`auth` — token sources](#auth--token-sources)
 - [`events` — the event plane](#events--the-event-plane)
@@ -47,7 +48,7 @@ they are not listed again as identifiers.
 
 | Import | Contents | Needs |
 |---|---|---|
-| `github.com/gravadigital/jiku-go` | `Client`, reads, writes, the envelope, the contract, filters, subjects | — |
+| `github.com/gravadigital/jiku-go` | `Client`, reads, writes, the envelope, the contract, filters, subjects, the key-value space | — |
 | `github.com/gravadigital/jiku-go/auth` | `TokenSource`, the device flow, service users, claims | — |
 | `github.com/gravadigital/jiku-go/events` | `Consumer`, `Event`, the 16 event types | a `*jiku.Client` |
 
@@ -55,6 +56,12 @@ they are not listed again as identifiers.
 request/reply over core NATS; `events` is JetStream, core is the emitter, and nothing there sends
 a request. They are separate planes with separate versions (`ProtocolVersion` is `v1` for
 subjects, `events.Version` is `v1` for events, and **they move independently**).
+
+The key-value space is JetStream too, and it still lives in the root, for two reasons. Its keys
+carry the caller's identity exactly as the request subjects do. And a refused operation has to
+fail through the client's own permission tracking: a separate package would have to swap the
+connection's error handler on every call, and concurrent calls would overwrite each other's.
+Core takes no part in it.
 
 `auth` is separate because obtaining a Zitadel token is the whole of authenticating to Jiku, and
 a caller that already holds a token needs none of it — implementing `TokenSource` is enough.
@@ -587,6 +594,76 @@ body can.**
 
 ---
 
+## `jiku` — the key-value space
+
+```go
+const KVBucket = "JIKU_KV"
+
+func KVKey(instance, userID, key string) string
+    // {instance}.{userID}.{key}
+func ValidKVKey(key string) error          // NATS's key rules, checked before any network
+func (c *Client) KV(ctx context.Context) (*KV, error)   // binds once, cached on the client
+
+type KV struct { /* unexported */ }
+func (s *KV) Put(ctx context.Context, key string, value []byte) (revision uint64, err error)
+func (s *KV) Get(ctx context.Context, key string) (*KVEntry, error)
+func (s *KV) Delete(ctx context.Context, key string) error
+
+type KVEntry struct {
+    Key      string      // as the caller wrote it, WITHOUT the prefix
+    Value    []byte
+    Revision uint64      // the bucket's sequence: moves on every write to ANY key
+    Created  time.Time
+}
+
+func RequiredKVPermissions(instance string) string
+
+var ErrKeyNotFound    // nothing under the key: a cache miss, not a failure
+var ErrNoBucket       // missing, no allow_direct, or JetStream off: the deployment's to fix
+var ErrValueTooLarge  // over the bucket's max value size, or the server's max_payload
+var ErrBucketFull     // the bucket's total size, shared by every identity
+var ErrKVPermissions  // the bus refused a subject; the message carries the grants
+```
+
+The full behaviour, the bucket settings and the limits are in [kv.md](kv.md).
+
+**[contract] The identity is the second segment of the key, raw, and the space adds it.**
+`{instance}.{userID}.{key}`, with `userID` the token's `sub` exactly as in `Subject`. A caller
+passes and gets back only `{key}`. The auth-callout grants each identity its own prefix, so a
+port that builds the key any other way gets every operation refused. There is **no version
+segment**: this is storage, not a protocol.
+
+**[contract] The three subjects, exactly:**
+
+```
+bind      $JS.API.STREAM.INFO.KV_JIKU_KV
+put/del   $KV.JIKU_KV.{instance}.{userID}.{key}
+get       $JS.API.DIRECT.GET.KV_JIKU_KV.$KV.JIKU_KV.{instance}.{userID}.{key}
+```
+
+`Get` must use the form with the key **in the subject**. The bare `$JS.API.DIRECT.GET.KV_JIKU_KV`
+and `$JS.API.STREAM.MSG.GET.KV_JIKU_KV` take the key in the body, which no permission can
+confine, so they are never granted. A port must not fall back to them.
+
+**[contract] Refuse a bucket without `allow_direct`.** Without it the NATS client sends `Get` to
+`STREAM.MSG.GET`. The failure would read as a missing permission, and the obvious fix, granting
+it, would open every identity's entries. Check the stream config at bind time and fail with a
+message pointing at the bucket.
+
+**[contract] A refused publish fails at once.** As on the request planes, the violation arrives on
+the error handler, and the operation is cancelled when it lands.
+
+**[contract] Key rules are NATS's own**: letters, digits and `- / _ = .`, no empty segment, no
+wildcards. Reject locally only what the NATS client would reject anyway.
+
+**A timeout is not `ErrTimeout`.** That sentinel says "no reply from core"; here it is JetStream,
+and the error matches `context.DeadlineExceeded` instead.
+
+No `Keys`, `Watch` or history, by design: each needs a consumer on the bucket, a wider grant
+than three exact subjects.
+
+---
+
 ## `jiku` — timing and tracing
 
 ```go
@@ -1050,6 +1127,15 @@ marked **[contract]** above; this is the same list, condensed, in the order a po
 - [ ] A bus permission violation is caught from the async error handler and fails the request
       immediately, rather than waiting out the timeout
 - [ ] "No responders" is reported distinctly from a timeout
+
+**Key-value**
+
+- [ ] Keys are `{instance}.{sub}.{key}`, no version; the caller writes and reads only `{key}`
+- [ ] `Get` is sent with the key in the subject, never in the body
+- [ ] A bucket without `allow_direct` is refused at bind
+- [ ] A refused publish fails as soon as the violation lands, with the grants in the message
+- [ ] Key validation is no stricter than the NATS client's
+- [ ] No `Keys`, no `Watch`, no history
 
 **Auth**
 

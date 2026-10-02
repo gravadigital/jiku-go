@@ -101,6 +101,7 @@ Everything here is also a Go library:
 		newBatchCmd(),
 		newCommandCmd(),
 		newEventsCmd(),
+		newKVCmd(),
 		newRawCmd(),
 		newConfigCmd(),
 	)

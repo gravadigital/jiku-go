@@ -8,6 +8,9 @@ There is a third plane where none of that holds. Core also **publishes** 16 doma
 JetStream, fire-and-forget, at-least-once, with 7 days of retention. It is a different transport
 with different guarantees, and it has its own page: [events.md](events.md).
 
+Each identity also has a key-value space, in a JetStream bucket, where core takes no part at
+all: [kv.md](kv.md).
+
 The authoritative contract lives in Jiku's own repository, as three AsyncAPI documents. Where the
 server and this page disagree, the server is right — and for the read plane you can ask it
 directly: `meta.describe` returns the whole contract as data, which is what `jiku describe`

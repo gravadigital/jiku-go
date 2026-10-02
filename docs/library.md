@@ -8,7 +8,7 @@ Two packages:
 
 | Package | Contents |
 |---|---|
-| `github.com/gravadigital/jiku-go` | package `jiku`: `Client`, queries, commands, the envelope, the contract, filters, pagination |
+| `github.com/gravadigital/jiku-go` | package `jiku`: `Client`, queries, commands, the envelope, the contract, filters, pagination, the key-value space |
 | `github.com/gravadigital/jiku-go/auth` | package `auth`: token sources — the device flow and service users |
 | `github.com/gravadigital/jiku-go/events` | package `events`: the domain event stream — see [events.md](events.md) |
 
@@ -442,6 +442,28 @@ caused by the bus. The same breakdown is available for any token source, outside
 ctx := auth.WithTrace(ctx, func(t auth.TokenTrace) { log.Printf("token: %+v", t) })
 tok, err := src.Token(ctx)
 ```
+
+---
+
+## Storing values
+
+Each identity has its own space in a key-value bucket, for state and caches:
+
+```go
+space, err := client.KV(ctx)
+rev, err := space.Put(ctx, "cache.report", body)
+
+entry, err := space.Get(ctx, "cache.report")
+if errors.Is(err, jiku.ErrKeyNotFound) {
+    // a miss: recompute and Put
+}
+
+err = space.Delete(ctx, "cache.report")
+```
+
+Keys are written without the identity: the space stores `cache.report` as
+`{instance}.{userID}.cache.report`. There is no listing and no watching. The bucket, its
+permissions and its limits, which are shared by every identity, are in [kv.md](kv.md).
 
 ---
 

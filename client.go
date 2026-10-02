@@ -28,6 +28,7 @@ type Client struct {
 
 	mu       sync.Mutex
 	contract *Contract
+	kv       *KV
 
 	connectTrace ConnectTrace
 
