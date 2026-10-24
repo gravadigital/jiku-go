@@ -303,6 +303,11 @@ its own key ("$KV.%[2]s.<its key>").
 STREAM.INFO is the line most often missing, and it does not look like a permissions problem: the
 server DROPS the refused request and the client reports the bucket as missing.
 
+Stopping a watch also asks the server to delete its ephemeral consumer
+("$JS.API.CONSUMER.DELETE.%[1]s.>"). Without that grant the refusal is logged and the consumer
+expires on its own, which is harmless; with it, an identity can delete other identities' watch
+consumers on the registry, which is why it is not in the list above.
+
 "$JS.API.*" and "$SRV.*" subjects carry no instance prefix: they are global to the NATS account.`,
 		stream, Bucket, serviceName)
 }

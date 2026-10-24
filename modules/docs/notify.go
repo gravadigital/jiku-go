@@ -134,7 +134,7 @@ func (c *Client) Notifications(ctx context.Context) (<-chan Notification, error)
 		return nil, fmt.Errorf("docs: confirming the subscription to %s: %w", subject, err)
 	}
 	if last := nc.LastError(); last != nil && strings.Contains(strings.ToLower(last.Error()), "permissions violation") &&
-		strings.Contains(last.Error(), NotifyToken) {
+		strings.Contains(last.Error(), `"`+subject+`"`) {
 		_ = sub.Unsubscribe()
 		return nil, fmt.Errorf("docs: the bus refused the subscription to %s.\n"+
 			"  Live notifications need this line on the role's template:\n\n"+

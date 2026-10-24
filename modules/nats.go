@@ -173,21 +173,20 @@ func (b *natsBackend) ping(ctx context.Context, service string) (time.Duration, 
 }
 
 // violation returns the connection's last error when it is a permissions violation naming
-// subject, or one of the registry's own subjects.
+// exactly subject.
 //
 // nats.go records every violation as the connection's last error. Reading it after a failure
 // avoids replacing the connection's error handler, which belongs to the jiku.Client and which
-// concurrent callers would otherwise overwrite.
+// concurrent callers would otherwise overwrite. The match is on the quoted subject and nothing
+// looser: a stale refusal of another registry subject — the consumer delete that stopping a
+// watch sends, say — must not turn a module that is down into a permissions problem.
 func (b *natsBackend) violation(subject string) error {
 	err := b.nc.LastError()
 	if err == nil {
 		return nil
 	}
 	msg := err.Error()
-	if !strings.Contains(strings.ToLower(msg), "permissions violation") {
-		return nil
-	}
-	if strings.Contains(msg, subject) || strings.Contains(msg, stream) || strings.Contains(msg, "$SRV.PING") {
+	if strings.Contains(strings.ToLower(msg), "permissions violation") && strings.Contains(msg, `"`+subject+`"`) {
 		return err
 	}
 	return nil
