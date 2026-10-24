@@ -120,7 +120,7 @@ var (
     ErrNoRegistry                                    // the bucket is missing or unusable
     ErrPermissions                                   // the bus refused a subject this needs
 )
-func RequiredPermissions(instance, serviceName string) string  // the template lines
+func RequiredPermissions(serviceName string) string  // the template lines
 ```
 
 - `Status` returns an error only when the state **cannot be known**: the bus refused a subject,

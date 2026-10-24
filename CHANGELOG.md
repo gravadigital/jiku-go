@@ -39,6 +39,17 @@ All notable changes to this project are documented here. The format follows
   `ErrKVPermissions`. Also `KVBucket`, `KVKey` and `ValidKVKey`, the `jiku kv put|get|delete`
   commands, and [docs/kv.md](docs/kv.md).
 
+- **Package `modules`: discovering Jiku's optional modules.** Opt-in, like `events`. A
+  `Registry` reads the key-value bucket `JIKU_MODULES` that Jiku's deployment creates (`Get`,
+  `Watch`) and pings a module with the NATS micro ping on `$SRV.PING.{serviceName}-queries`.
+  `Status` answers one of `not_installed`, `incompatible`, `unavailable` or `available`, with the
+  record (and so the module's `Plane`) and the ping time. A module that is absent or down is a
+  state; only what prevents knowing — a refused subject (`ErrPermissions`), a missing bucket
+  (`ErrNoRegistry`) — is an error. A refused ping is never reported as a module that is down: the
+  bus drops a refused publish, so the two look identical from the outside, and the connection's
+  last error is checked to tell them apart. `RequiredPermissions` prints the grant lines. The
+  bucket must have `allow_direct`, so a read can be granted key by key.
+
 ### Fixed
 
 - **Every plane but core's commands got core's read-plane identity list.** The rule was "the
