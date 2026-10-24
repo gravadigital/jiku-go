@@ -50,6 +50,22 @@ All notable changes to this project are documented here. The format follows
   last error is checked to tell them apart. `RequiredPermissions` prints the grant lines. The
   bucket must have `allow_direct`, so a read can be granted key by key.
 
+- **Package `modules/docs`: a client for the docs module.** `Open` reads the registry, checks
+  the protocol, pings the module, and returns a client on the plane the registry names — never on
+  a service name compiled in. The generic operations (`Query`, `Command`, `List`, `Iterate`,
+  `Contract`, `Describe`) are core's, against the module. The helpers do what a caller would get
+  wrong by hand: `New`, `Put`, `Move`, `Delete`, `Restore`, `Versions`, `Lock`, `Unlock`,
+  `Search`, `Changes`, `GetDocument`, `GetContent`, `ResolveDocument`/`ResolveFolder` (an id or a
+  path), `Children`, `Attach` (request, `PUT` with the declared type, confirm), `Share`, `Revoke`,
+  `Shares`, and `Notifications` (the person's `docs-notify` subject, confirmed with the server so
+  a refused subscription is an error rather than silence). They generate ULIDs (`NewID`), compute
+  `sha256:<hex>` checksums (`Checksum`), send content above 256 KiB through a presigned URL — and
+  fall back to it when the module refuses inline content as too large — and verify downloaded
+  content against its checksum. `via` comes from `JIKU_VIA` (`agent` or `human`). One constant
+  per code of the module's catalog (`CodeVersionConflict`, `CodeDocumentLocked`,
+  `CodeShareNotFound`, …), pinned against the module's contracts in both directions, plus
+  `CurrentVersion`, `LockHolder`, `IsNotFound` and `Hint`.
+
 ### Fixed
 
 - **Every plane but core's commands got core's read-plane identity list.** The rule was "the

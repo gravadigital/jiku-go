@@ -188,7 +188,7 @@ against the module's plane. `meta.describe` is the authority on resources, field
 | Method | What it does on the caller's behalf |
 |---|---|
 | `GetDocument(ctx, id, GetOptions)` | `documents.get` with `include`/`version` |
-| `GetContent(ctx, id, version)` | fetches `content`, or downloads `contentUrl` when the module sent that instead, and verifies the checksum |
+| `GetContent(ctx, ref, GetOptions)` | id or path; fetches `content`, or downloads `contentUrl` when the module sent that instead, and verifies the checksum |
 | `New(ctx, NewDocument)` | generates the ULID when none is given, computes `sha256:<hex>`, goes by URL above 256 KiB (or when the module answers `content_too_large` inline) |
 | `Put(ctx, id, content, PutOptions)` | `documents.{id}.update` with `baseVersion` (required), session, message, `via`, same transport choice |
 | `Move`, `Delete`, `Restore` | always with `baseVersion` |
@@ -196,15 +196,19 @@ against the module's plane. `meta.describe` is the authority on resources, field
 | `Lock(ctx, id, LockOptions)` / `Unlock(ctx, id, sessionID, force)` | session ULID generated when none is given; repeating `Lock` with the same session renews |
 | `Search(ctx, SearchQuery)` | `documents.search` |
 | `Changes(ctx, sinceSeq, limit, pathPrefix)` | one page of `documents.changes` |
-| `ResolveDocument(ctx, ref, ResolveOptions)` / `ResolveFolder(ctx, ref)` | accepts an id **or a path** (`/infra/servidores/staging.md`) |
+| `ResolveDocument(ctx, ref, ResolveOptions)` / `ResolveDocumentID` / `ResolveFolder(ctx, ref)` | accepts an id **or a path** (`/infra/servidores/staging.md`); an id costs no round trip |
 | `Children(ctx, folderID)` | folders and documents directly inside a folder, every page |
 | `Attach(ctx, AttachOptions)` | `attachments.request-upload`, HTTP `PUT` with the declared content type, `confirm`; returns the stable link |
 | `Share(ctx, ShareOptions)` / `Revoke(ctx, shareID)` / `Shares(ctx, documentID, status)` | links; the token comes back once and is never stored |
 | `Notifications(ctx)` | subscribes to `{instance}.{userId}.docs-notify.v1.>`, decoded |
 
 Free functions: `NewID()` (a ULID), `ValidID`, `Checksum([]byte)` (`sha256:<hex>`),
-`ViaFromEnv()`, `CurrentVersion(err)` (from `version_conflict`), `LockHolder(err)` (from
-`document_locked`), `IsNotFound(err)`.
+`ViaFromEnv()`, `DetectMimeType`, `NotifySubject(instance, userID)`, `CurrentVersion(err)` (from
+`version_conflict`), `LockHolder(err)` (from `document_locked`), `IsNotFound(err)`, and
+`Hint(err)` — advice for the codes whose fix is not obvious, written for a person or an agent.
+Sentinels: `ErrNotFound` (a path that resolves to nothing; the module is asked by id) and
+`ErrContentMismatch` (content that does not hash to its checksum). Notification types:
+`TypeDocumentCreated` … `TypeAccessChanged`.
 
 ### Error codes
 
