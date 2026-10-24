@@ -287,7 +287,7 @@ func (e *Engine) online(ctx context.Context, rec modules.Record, changes <-chan 
 	}
 	if last.IsZero() || e.cfg.Now().Sub(last) >= e.cfg.FullEvery {
 		err = e.fullReconcile(ctx, r)
-	} else {
+	} else if err = e.refreshFolders(ctx, r); err == nil {
 		err = e.catchUp(ctx, r)
 		if err == nil {
 			err = e.scanLocal(ctx, r)
@@ -427,7 +427,9 @@ func (e *Engine) fullReconcile(ctx context.Context, r Remote) error {
 		prefixes = []string{""}
 	}
 	remote := map[string]RemoteDoc{}
-	e.folders, e.permissions = map[string]RemoteFolder{}, map[string]string{}
+	if err := e.refreshFolders(ctx, r); err != nil {
+		return err
+	}
 	for _, prefix := range prefixes {
 		docs, err := r.ListDocuments(ctx, prefix)
 		if err != nil {
@@ -435,13 +437,6 @@ func (e *Engine) fullReconcile(ctx context.Context, r Remote) error {
 		}
 		for _, d := range docs {
 			remote[d.ID] = d
-		}
-		fs, err := r.Folders(ctx, prefix)
-		if err != nil {
-			return err
-		}
-		for _, f := range fs {
-			e.learnFolder(f)
 		}
 	}
 
@@ -470,6 +465,26 @@ func (e *Engine) fullReconcile(ctx context.Context, r Remote) error {
 		return err
 	}
 	return e.state.SetLastFull(e.cfg.Now())
+}
+
+// refreshFolders reloads the readable folders and the person's permission on each, which decide
+// where new files may go and which files are read-only on disk.
+func (e *Engine) refreshFolders(ctx context.Context, r Remote) error {
+	prefixes := e.cfg.Only
+	if len(prefixes) == 0 {
+		prefixes = []string{""}
+	}
+	e.folders, e.permissions = map[string]RemoteFolder{}, map[string]string{}
+	for _, prefix := range prefixes {
+		fs, err := r.Folders(ctx, prefix)
+		if err != nil {
+			return err
+		}
+		for _, f := range fs {
+			e.learnFolder(f)
+		}
+	}
+	return nil
 }
 
 // reconcileDoc brings one listed document in line.
