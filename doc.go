@@ -8,6 +8,11 @@
 // Each identity also has its own space in a JetStream key-value bucket, for state and caches:
 // see Client.KV. Core takes no part in it.
 //
+// Jiku's optional modules answer the same grammar on planes of their own. Client.On points the
+// client at one — On(ModulePlane(serviceName)) — on the same connection and identity. Which
+// modules exist, and on which services, is the module registry's to say: see the modules
+// subpackage, and modules/docs for the docs module.
+//
 // # Getting started
 //
 //	src, err := auth.NewServiceUser(auth.ServiceUserConfig{

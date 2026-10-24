@@ -4,13 +4,15 @@
 go get github.com/gravadigital/jiku-go
 ```
 
-Two packages:
+Five packages:
 
 | Package | Contents |
 |---|---|
-| `github.com/gravadigital/jiku-go` | package `jiku`: `Client`, queries, commands, the envelope, the contract, filters, pagination, the key-value space |
+| `github.com/gravadigital/jiku-go` | package `jiku`: `Client`, queries, commands, the envelope, the contract, filters, pagination, planes, the key-value space |
 | `github.com/gravadigital/jiku-go/auth` | package `auth`: token sources — the device flow and service users |
 | `github.com/gravadigital/jiku-go/events` | package `events`: the domain event stream — see [events.md](events.md) |
+| `github.com/gravadigital/jiku-go/modules` | package `modules`: the registry of optional modules — installed, compatible, up? |
+| `github.com/gravadigital/jiku-go/modules/docs` | package `docs`: a client for the docs module — see [docs-module.md](docs-module.md) |
 
 `go doc github.com/gravadigital/jiku-go` for the full reference. This page is the
 narrative version; [reference.md](reference.md) is the exhaustive one, and marks which
@@ -464,6 +466,85 @@ err = space.Delete(ctx, "cache.report")
 Keys are written without the identity: the space stores `cache.report` as
 `{instance}.{userID}.cache.report`. There is no listing and no watching. The bucket, its
 permissions and its limits, which are shared by every identity, are in [kv.md](kv.md).
+
+---
+
+## Optional modules
+
+A module answers core's grammar on services of its own. Three layers, each usable alone.
+
+### Any plane: `Client.On`
+
+```go
+p := client.On(jiku.ModulePlane("jiku-docs"))   // jiku-docs-queries / jiku-docs-commands
+col, err := p.List(ctx, "documents", jiku.List{Filter: jiku.F{"pathPrefix": "/infra/"}})
+ct, err := p.Contract(ctx)                       // the module's meta.describe, cached per plane
+data, err := p.Command(ctx, "documents."+id+".lock", payload)
+```
+
+Same connection, identity and inbox as core. `Client`'s own methods are `On(jiku.CorePlane())`.
+`PlaneClient.Get` takes the whole body because module ids need not be integers. On a module's
+planes this client refuses only `actor` locally; everything else is the module's to judge.
+
+### The registry: `modules`
+
+Which service a module answers on is not compiled in anywhere; the registry says.
+
+```go
+reg, err := modules.New(client)
+st, err := reg.Status(ctx, "docs", "v1")
+if err != nil {
+    // the state could not be known: modules.ErrPermissions (the error prints the grant
+    // lines), modules.ErrNoRegistry (the bucket is missing)
+}
+switch st.Status {
+case modules.Available:    // st.Record.Plane(), st.Ping
+case modules.Unavailable:  // installed and down
+case modules.Incompatible: // another protocol; st.Reason says which
+case modules.NotInstalled:
+}
+
+changes, err := reg.Watch(ctx, "docs")   // the present first, then every change
+for c := range changes {
+    if c.Record == nil { /* uninstalled */ }
+}
+```
+
+`Status` never reports a refused ping as "down": the bus drops a refused publish, which looks
+exactly like a module that is not answering, so the connection's last error is checked first.
+
+### The docs module: `modules/docs`
+
+```go
+d, err := docs.Open(ctx, client, docs.Options{})   // registry + protocol + ping
+switch {
+case errors.Is(err, modules.ErrNotInstalled):
+case errors.Is(err, modules.ErrUnavailable):
+}
+
+doc, content, err := d.GetContent(ctx, "/infra/servidores/staging.md", docs.GetOptions{})
+res, err := d.Put(ctx, doc.ID, edited, docs.PutOptions{BaseVersion: doc.Version, Message: "Puerto"})
+if v, ok := docs.CurrentVersion(err); ok {
+    // version_conflict: re-read version v, merge, retry on it
+}
+
+res, err = d.New(ctx, docs.NewDocument{FolderID: folder.ID, FileName: "acta.md", Content: body})
+hits, err := d.Search(ctx, docs.SearchQuery{Query: `"aduana" -prueba`, Filter: jiku.F{"projectId": 12}})
+lock, err := d.Lock(ctx, doc.ID, docs.LockOptions{TTL: 5 * time.Minute})
+att, err := d.Attach(ctx, docs.AttachOptions{DocumentID: doc.ID, FileName: "red.png", Content: png})
+notes, err := d.Notifications(ctx)                  // this identity's docs-notify subject
+```
+
+What the helpers do for you: ULIDs for new ids (`docs.NewID`; reuse one on a retry, that is what
+makes it safe), `sha256:<hex>` checksums, presigned uploads above 256 KiB — and when the module
+refuses inline content as too large — the checksum check on what is downloaded, paths where ids
+go, and `via` (`docs.ViaFromEnv` reads `JIKU_VIA`). The generic `Query`, `Command`, `List`,
+`Iterate`, `Contract` and `Describe` reach everything else. Every code of the module's catalog
+has a constant (`docs.CodeVersionConflict`, `docs.CodeDocumentLocked`, …) for `jiku.IsCode`, and
+`docs.Hint(err)` explains the ones whose fix is not obvious.
+
+A test can build a client on a fake plane with `docs.NewClient(bus, opts)`: `Bus` is five methods
+and `*jiku.PlaneClient` is the real one.
 
 ---
 

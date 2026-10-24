@@ -78,6 +78,47 @@ it.
 them" and `core-events.yaml` deliberately excludes them from its `EventType` enum, so core does
 not emit them. Nothing to do here until they appear in the contract.
 
+## Optional modules — a separate plane, a separate pin
+
+Core's pin above does not cover modules, and this section does not move it. A module's contract
+belongs to the module's own repository and versions independently of core's; the registry that
+announces modules belongs to Jiku's.
+
+### The module registry
+
+| | |
+|---|---|
+| **Owner** | Jiku's repository (`docs/apis/jiku-modules.yaml`, with REQ-016) |
+| **State in this client** | **applied** — the `modules` package |
+| **Read** | 2026-10-24, from the docs module's repository, before Jiku had copied it in |
+
+The bucket `JIKU_MODULES` with `allow_direct`, one key per module (`module`, `serviceName`,
+`protocol`, `registeredAt`, unknown fields tolerated), the four states, and the ping on
+`$SRV.PING.{serviceName}-queries`. **The next sync must re-read it from Jiku's own `docs/apis/`**
+once it lands there, and pin that commit here.
+
+### The docs module (`docs`, protocol `v1`)
+
+| | |
+|---|---|
+| **Owner** | the jiku-docs repository, branch `dev` |
+| **Commit read** | `c144a47` — contracts at `1.0.0` |
+| **Also read** | that repository's uncommitted `1.1.0` implementation notes, 2026-10-24: `meta.describe` takes `resources` like core's; `documents.get` with `version` returns that version's checksum; external users see no folders; `folder.updated` is also notified as `access.changed`. None required a change here |
+| **Verified** | against the contracts only. Not yet against a running module |
+
+| Contract | State in this client |
+|---|---|
+| commands — 18 | **applied** — `modules/docs` helpers, `jiku docs cmd` and the ergonomic commands |
+| queries — 13 | **applied** — generic through `meta.describe`; helpers for `documents.get`, `.search`, `.changes`, `.versions.list`, `folders.*`, `shares.list` |
+| events and notifications | **applied for notifications** (`Client.Notifications`, the sync daemon). The `JIKU_DOCS_EVENTS` stream is for services and is not consumed here |
+| error catalog — 30 codes | **applied** — `docs.Code…`, pinned in both directions by a test |
+
+`shares.resolve` and `shares.attachment` are callable through the generic `Query` but have no
+helper: only the api may call them.
+
+When the module's contract changes, diff from the commit above, as for core. Its YAML is not
+vendored here either.
+
 ## Updating this file
 
 Only as the last step of a sync, once `make ci` is green and the changes are committed. A pin that

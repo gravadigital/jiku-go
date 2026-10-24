@@ -56,6 +56,9 @@ Getting started
 Each invocation opens its own connection, which costs a token and about 2.5 round trips. For
 several queries in a row, "jiku batch" runs them all over one connection.
 
+When the deployment runs the optional docs module, "jiku docs" works with its documents and
+"jiku docs sync" mirrors them into a local folder; "jiku docs status" says whether it is there.
+
 Configuration is resolved flag > environment > file > default. The file lives at
 ~/.config/jiku/config.yaml; run "jiku config init" to write a commented one.
 

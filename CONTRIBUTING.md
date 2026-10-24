@@ -43,6 +43,9 @@ so `make tag` refuses the mistakes that cannot be undone.
 /                 package jiku — the library. Its import path IS the module path.
 /auth/            token sources: the device flow and service users
 /events/          package events — the JetStream domain event plane (opt-in)
+/modules/         package modules — the registry of optional modules (opt-in)
+/modules/docs/    package docs — the docs module's client
+/internal/docsync the engine of `jiku docs sync`: CLI code, not importable
 /cmd/jiku/         the CLI, a thin shell over the library
 /docs/            protocol, auth, library and command-reference guides
 /tools/gendocs/   regenerates docs/commands.md from Jiku's own contract — never hand-edit it
@@ -54,9 +57,9 @@ so `make tag` refuses the mistakes that cannot be undone.
 
 The library sits at the module root because that is the
 [official layout](https://go.dev/doc/modules/layout) for a repository holding both an importable
-package and a command. There is no `internal/` yet: everything the library exposes is meant to be
-imported, and `internal/` is compiler-enforced *un*importable. It is where shared CLI code would
-go if `cmd/` ever grows a second binary.
+package and a command. `internal/` holds only CLI code — the sync daemon's engine — because
+it is compiler-enforced *un*importable: everything the library exposes is meant to be
+imported, and what is in `internal/` is free to change.
 
 ## What this codebase is trying to be
 

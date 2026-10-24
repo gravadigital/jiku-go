@@ -1,6 +1,6 @@
 # The API of this client, in full
 
-Every exported identifier in the three packages, grouped by what it is for, with the behaviour
+Every exported identifier in the five packages, grouped by what it is for, with the behaviour
 that is **contractual** rather than incidental called out.
 
 **Who this is for.** Two readers, and the second is why it goes into this much detail:
@@ -40,17 +40,25 @@ they are not listed again as identifiers.
 - [`jiku` — timing and tracing](#jiku--timing-and-tracing)
 - [`auth` — token sources](#auth--token-sources)
 - [`events` — the event plane](#events--the-event-plane)
+- [`jiku` — planes](#jiku--planes)
+- [`modules` — the module registry](#modules--the-module-registry)
+- [`modules/docs` — the docs module](#modulesdocs--the-docs-module)
 - [Porting checklist](#porting-checklist)
 
 ---
 
-## The three packages
+## The five packages
 
 | Import | Contents | Needs |
 |---|---|---|
-| `github.com/gravadigital/jiku-go` | `Client`, reads, writes, the envelope, the contract, filters, subjects, the key-value space | — |
+| `github.com/gravadigital/jiku-go` | `Client`, reads, writes, the envelope, the contract, filters, subjects, planes, the key-value space | — |
 | `github.com/gravadigital/jiku-go/auth` | `TokenSource`, the device flow, service users, claims | — |
 | `github.com/gravadigital/jiku-go/events` | `Consumer`, `Event`, the 16 event types | a `*jiku.Client` |
+| `github.com/gravadigital/jiku-go/modules` | `Registry`, `Status`, `Record` — which optional modules exist and whether they answer | a `*jiku.Client` |
+| `github.com/gravadigital/jiku-go/modules/docs` | `Client` for the docs module, its types and its error catalog | a `*jiku.Client` |
+
+`internal/docsync`, the engine of `jiku docs sync`, is not importable and promises nothing; only
+the command and its on-disk layout are covered.
 
 **[contract] The split between the root and `events` is not cosmetic.** The root package is
 request/reply over core NATS; `events` is JetStream, core is the emitter, and nothing there sends
@@ -65,6 +73,11 @@ Core takes no part in it.
 
 `auth` is separate because obtaining a Zitadel token is the whole of authenticating to Jiku, and
 a caller that already holds a token needs none of it — implementing `TokenSource` is enough.
+
+`modules` and `modules/docs` are separate because modules are optional: a caller that never uses
+one never imports the registry, and the docs module's types and catalog are its own, not core's.
+They reach the bus through the root package's `PlaneClient`, so they inherit the inbox prefix,
+the permission tracking and the timing without reimplementing any of it.
 
 ---
 
@@ -345,6 +358,12 @@ exact failure this client exists to prevent, refusing what the server accepts.
 `actor` stays forbidden because it is the reserved identity envelope the dispatcher extracts
 before validating. Only the api's own service user may carry it.
 
+**A module's planes, both of them, refuse only `actor` too.** The rule is "core's read plane gets
+the eleven names; every other service gets `actor`", not "the command plane gets `actor`;
+everything else gets the eleven" — which is what it read until modules existed, and which refused
+names a module may well accept. A module validates its own payloads; its contract reserves
+`actor` exactly as core's does.
+
 ---
 
 ## `jiku` — the contract
@@ -572,7 +591,12 @@ func Subject(instance, userID, service, method string) string
 func HashUserID(userID string) string
 func InboxPrefix(userID string) string      // _INBOX.<HashUserID(sub)>
 func SplitMethod(method string) (resource, operation string, ok bool)
+func ValidServiceName(name string) error    // one lower-case subject token
 ```
+
+`{service}` is `jiku-queries` or `jiku-commands` for core, and `{serviceName}-queries` /
+`{serviceName}-commands` for a module, where the module registry gives `serviceName` — see
+[planes](#jiku--planes).
 
 **[contract] `HashUserID` must reproduce the auth-callout's hash byte for byte.** The callout uses
 it to mint the subscribe permission and the client uses it to pick its inbox, **with no channel
@@ -1085,6 +1109,153 @@ found"*. A stream that plainly exists, reported missing, is that line.
 
 ---
 
+## `jiku` — planes
+
+```go
+type Plane struct{ Queries, Commands string }
+func CorePlane() Plane                              // jiku-queries / jiku-commands
+func ModulePlane(serviceName string) Plane          // {serviceName}-queries / -commands
+func (p Plane) IsCore() bool
+
+type PlaneClient struct{ /* unexported */ }
+func (c *Client) On(p Plane) *PlaneClient
+func (p *PlaneClient) Plane() Plane
+func (p *PlaneClient) Query(ctx, method string, payload any) (json.RawMessage, error)
+func (p *PlaneClient) Command(ctx, method string, payload any) (json.RawMessage, error)
+func (p *PlaneClient) Request(ctx, write bool, method string, payload any) (*Reply, error)
+func (p *PlaneClient) List(ctx, resource string, q List) (*Collection, error)
+func (p *PlaneClient) ListInto(ctx, resource string, q List, dest any) (Page, error)
+func (p *PlaneClient) Get(ctx, resource string, payload any) (*Item, error)
+func (p *PlaneClient) Iterate(ctx, resource string, q List) *Iterator
+func (p *PlaneClient) All(ctx, resource string, q List, dest any) error
+func (p *PlaneClient) Describe(ctx, resources ...string) (*Contract, error)
+func (p *PlaneClient) Contract(ctx) (*Contract, error)
+
+type ListFunc func(ctx context.Context, resource string, q List) (*Collection, error)
+func NewIterator(ctx context.Context, resource string, q List, list ListFunc) *Iterator
+```
+
+A plane is a pair of micro services that speak core's grammar. `Client`'s reading and writing
+methods are `On(CorePlane())`; an optional module is `On(ModulePlane(serviceName))`, on the same
+connection, identity and inbox.
+
+- **[contract] Module service names come from the registry**, never from the code: a module with
+  `serviceName: S` serves `S-queries` and `S-commands`.
+- **The contract is cached per plane**, not per client: a module's whitelists are not core's.
+- `PlaneClient.Get` takes the whole body, since a module's ids need not be integers; a `Get` is
+  still accepted as that body.
+- `NewIterator` is the cursor walk with its termination rule, over any page source — how a
+  wrapper or a test gets it without a bus. It is idiom; a port needs only the rule.
+- Transport errors name the service of the subject. For a module, "nothing is listening" also
+  means "installed and down".
+
+---
+
+## `modules` — the module registry
+
+```go
+const Bucket = "JIKU_MODULES"
+const DefaultPingTimeout = 3 * time.Second
+
+type Status string
+const NotInstalled, Incompatible, Unavailable, Available Status = …
+
+type Record struct {
+    Module, ServiceName, Protocol string
+    RegisteredAt time.Time
+    Raw json.RawMessage
+}
+func (r Record) Plane() jiku.Plane
+
+type State struct { Module string; Status Status; Record *Record; Ping time.Duration; Reason string }
+func (s State) Err() error
+type Change struct { Module string; Record *Record; Err error }
+
+type Client interface { Conn() *nats.Conn; Instance() string }
+type Registry struct{ /* unexported */ }
+func New(c Client) (*Registry, error)
+func (r *Registry) Get(ctx, module string) (*Record, error)
+func (r *Registry) Ping(ctx, serviceName string) (time.Duration, error)
+func (r *Registry) Status(ctx, module, protocol string) (State, error)
+func (r *Registry) Watch(ctx, module string) (<-chan Change, error)
+func RequiredPermissions(serviceName string) string
+
+var ErrNotInstalled, ErrIncompatible, ErrUnavailable, ErrNoRegistry, ErrPermissions error
+```
+
+- **[contract] The four states.** No key: `not_installed`. A `protocol` the caller does not speak:
+  `incompatible`, treated as not installed. Key present and `$SRV.PING.{serviceName}-queries`
+  unanswered: `unavailable`. Answered: `available`. A shutdown does not remove the key; only a
+  deliberate deregistration does.
+- **[contract] Readers tolerate unknown fields** in the record; new optional fields arrive within
+  `v1`. `Raw` keeps them.
+- **A refused ping is not a module that is down.** The bus drops a refused publish, so the ping
+  times out exactly as for a dead module. `Status` checks the connection's last error for a
+  violation on the ping subject and reports `ErrPermissions`. A port that skips this sends
+  people to restart a module that is running.
+- **The bucket must have `allow_direct`**, so a read goes to
+  `$JS.API.DIRECT.GET.KV_JIKU_MODULES.$KV.JIKU_MODULES.{module}` — a subject a template grants per
+  key. `Watch` delivers the present value first (nil when there is none), then every change.
+- `Status` returns an error only when the state cannot be known: `ErrPermissions`,
+  `ErrNoRegistry`. Absent, incompatible and down are states.
+
+---
+
+## `modules/docs` — the docs module
+
+```go
+const Module = "docs"; const Protocol = "v1"; const NotifyToken = "docs-notify"
+const EnvVia = "JIKU_VIA"; const InlineContentLimit = 256 << 10
+
+type Via string // ViaHuman, ViaAgent, ViaService
+func ViaFromEnv() (Via, error)
+
+type Bus interface { Query; Command; List; Describe; Contract }   // *jiku.PlaneClient
+type Notifier interface { Conn() *nats.Conn; Instance() string; UserID() string }
+type Options struct { Via Via; HTTPClient *http.Client; Notify Notifier }
+
+func Open(ctx, c *jiku.Client, opts Options) (*Client, error)
+func NewClient(bus Bus, opts Options) *Client
+```
+
+| Method | |
+|---|---|
+| `State`, `Via` | what `Open` found; what is sent as `via` |
+| `Query`, `Command`, `List`, `Iterate`, `Contract`, `Describe` | the module's plane, as on core; `Describe` selects resources from the full contract |
+| `GetDocument(ctx, id, GetOptions)` | `documents.get` |
+| `GetContent(ctx, ref, GetOptions)` | id or path; inline content or `contentUrl`, checked against the checksum |
+| `New(ctx, NewDocument)` / `Put(ctx, id, content, PutOptions)` | id and checksum computed; inline or by URL |
+| `Move`, `Delete`, `Restore`, `Versions` | always with a base version |
+| `Lock(ctx, id, LockOptions)` / `Unlock(ctx, id, session, force)` | session generated if none |
+| `Search(ctx, SearchQuery)` / `Changes(ctx, sinceSeq, limit, pathPrefix)` | |
+| `ResolveDocument`, `ResolveDocumentID`, `ResolveFolder`, `Children` | paths to ids; folder contents |
+| `Attach(ctx, AttachOptions)` | request, `PUT`, confirm; returns the link |
+| `Share(ctx, ShareOptions)` / `Revoke(ctx, id)` / `Shares(ctx, documentID, status)` | links |
+| `Notifications(ctx)` | the identity's `docs-notify` subject |
+
+Free functions: `NewID`, `ValidID`, `Checksum`, `DetectMimeType`, `NotifySubject`,
+`CurrentVersion`, `LockHolder`, `IsNotFound`, `Hint`. Sentinels `ErrNotFound`,
+`ErrContentMismatch`. One `Code…` constant per code of the module's catalog (30, pinned against
+its contracts in both directions), `WarningPossibleSecret`, and the `Type…` notification types.
+
+- **[contract] Every creation takes a client-generated ULID**, and a retry with the same id is the
+  same creation. Generate it once per intended creation, never per attempt.
+- **[contract] Every modification takes `baseVersion`**; content identical to the current version
+  succeeds without a new one, so a retry is safe.
+- **[contract] Checksums are `sha256:` + lower-case hex.** Content above 256 KiB travels through
+  `documents.request-content-upload` and a presigned `PUT`; a reply above it carries `contentUrl`.
+  The threshold is the module's: an inline `content_too_large` is retried by URL.
+- **[contract] A presigned upload sends the content type that was declared**: the URL may be
+  signed for it, and storage refuses any other. Attachments use the declared `mimeType`.
+- **The module has no exact-path filter.** A path is resolved by its folder prefix and file name,
+  and the exact match picked by the client, ignoring case (file names are unique per folder
+  regardless of case).
+- **[contract] Notifications are plain NATS**: lost when nobody listens. The change feed
+  (`documents.changes`) covers the gap. A subscription is confirmed with a flush, so a refused
+  one is an error, not silence.
+
+---
+
 ## Porting checklist
 
 The behaviours a client in another language has to reproduce to be correct. Everything here is
@@ -1118,6 +1289,7 @@ marked **[contract]** above; this is the same list, condensed, in the order a po
 
 - [ ] The read plane's eleven forbidden keys are **not** applied to the write plane
 - [ ] The write plane forbids `actor` and nothing else
+- [ ] A module's planes, reads included, forbid `actor` and nothing else
 - [ ] Ids go in the method, not the payload
 
 **Errors**
@@ -1163,3 +1335,13 @@ marked **[contract]** above; this is the same list, condensed, in the order a po
 - [ ] The raw payload is preserved alongside the decoded event
 - [ ] Permissions are the narrow six subjects, never `$JS.API.>`
 - [ ] "Stream not found" names **both** its causes — absent stream, or missing `STREAM.INFO`
+
+**Modules**
+
+- [ ] Service names come from the registry record, never from code
+- [ ] Unknown fields in a record are tolerated
+- [ ] A refused ping is reported as a permissions problem, never as a module that is down
+- [ ] The contract is cached per plane
+- [ ] Docs: one ULID per intended creation, reused on retry; `baseVersion` on every change
+- [ ] Docs: `sha256:<hex>`; by URL above the inline limit, and again when the module says so
+- [ ] Docs: a presigned upload carries exactly the declared content type

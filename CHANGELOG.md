@@ -97,6 +97,13 @@ All notable changes to this project are documented here. The format follows
   core and of the docs module mix over one connection. The module is opened once, on first use,
   and a module that cannot be opened fails only its own lines.
 
+- **Documentation for modules.** [docs/docs-module.md](docs/docs-module.md) (the docs module and
+  the sync daemon), [docs/agents.md](docs/agents.md) (the rules for an AI agent: search before
+  creating, cite document and version, save only what was accepted, never share or revoke without
+  confirmation) and [docs/modules.md](docs/modules.md) (the design). `library.md`, `reference.md`,
+  `protocol.md`, `auth.md`, the README and `CONTRACT.md` — which records the docs module as a
+  plane with a pin of its own, leaving core's untouched — describe the module planes.
+
 ### Fixed
 
 - **Every plane but core's commands got core's read-plane identity list.** The rule was "the

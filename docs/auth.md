@@ -117,6 +117,11 @@ permissions. The templates are the whole authorization model, and they are small
 | `core` | — | both service prefixes |
 | `bus-observer` | nothing | everything |
 
+An optional module adds its own lines to these templates — the docs module's two planes for the
+roles that may use it, its notification subject for people, and read access to the module
+registry. Which role gets what is the deployment's; [docs-module.md](docs-module.md#permissions)
+lists what this client needs, and every refusal prints the missing line.
+
 Two consequences worth internalising:
 
 **What a person may write is decided by one wildcard.** In the person template it sits at
@@ -131,10 +136,11 @@ core's own source says as much about adding a role, and the same applies to addi
 
 **Your identity is the subject.** `{instance}.{sub}.{service}.v1.{method}`, where `sub` is your
 Zitadel subject, raw. The callout only authorises publishing under *your own* id, which is what
-makes the subject unforgeable while the body is not. That in turn is why the read plane
+makes the subject unforgeable while the body is not. That in turn is why core's read plane
 **rejects** identity fields in payloads (`userId`, `caller`, `sub`, `actor`, and eight more): an
 *ignored* identity field would suggest you may ask on somebody else's behalf and that the service
-simply did not listen this time.
+simply did not listen this time. Every other plane — core's commands, and both planes of a
+module — reserves only `actor`.
 
 ---
 
@@ -408,6 +414,9 @@ missing-row failure described above for anyone who executes a command.
 | `caller_not_authorized` | 5 | your role authorises nothing in **core's** map (watch for `internal-app`), core has no `users` row for you, or a first-request race with the auth event |
 | `unknown_caller` | 5 | core could not resolve your caller class — same missing-row cause |
 | `unknown_command` | 5 | no endpoint for that method; check `jiku describe` |
+| `jiku docs …` exits 3 | — | the docs module is not installed (or speaks another protocol); core is unaffected |
+| `jiku docs …` exits 4 | — | the docs module is registered and not answering its ping: it is down |
+| `modules: the bus refused …` | 3 | your template lacks the registry or the ping lines; the message prints them |
 
 Start with `jiku doctor`. It walks these in order and stops at the first break, because a later
 check would only produce a second, misleading symptom.

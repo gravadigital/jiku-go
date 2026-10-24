@@ -196,3 +196,18 @@ variable names, and reasoning about trust boundaries. None of that belongs in a 
 
 Only the **derived, consumer-facing** Markdown (`docs/commands.md`) is committed. Do not copy the
 YAML into this repository, not even into `testdata/`. See [CONTRIBUTING.md](../CONTRIBUTING.md).
+
+---
+
+## Modules follow the same procedure, from their own repository
+
+An optional module's contract lives in the module's repository, not Jiku's, and has its own pin in
+`CONTRACT.md` under "Optional modules". The registry contract (`jiku-modules.yaml`) is Jiku's.
+Everything above applies unchanged — diff from the pinned commit, extract lists with a script,
+hunt the prose — with two additions:
+
+- The docs module's error catalog is pinned in `modules/docs` by
+  `TestErrorCatalogMatchesTheModuleContract`: the union of every `x-error-codes` list and of the
+  `Failure` examples in its command and query contracts, extracted by script.
+- The module's `version:` field does move (`1.0.0`, `1.1.0`) and its changes are listed in its own
+  changelog — still pin the commit, not the number.

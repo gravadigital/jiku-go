@@ -2,8 +2,9 @@
 
 A Go client for **Jiku's API**, which lives on NATS rather than HTTP: 23 read endpoints
 (*queries*) and 23 write endpoints (*commands*), request/reply, no REST anywhere — plus the
-16 domain events core publishes over JetStream (*[events](docs/events.md)*), and a key-value
-space of each identity's own (*[kv](docs/kv.md)*).
+16 domain events core publishes over JetStream (*[events](docs/events.md)*), a key-value
+space of each identity's own (*[kv](docs/kv.md)*), and Jiku's optional modules — the first being
+the docs module, with `jiku docs` and a two-way sync daemon (*[docs](docs/docs-module.md)*).
 
 This repo produces two things from the same code:
 
@@ -220,6 +221,25 @@ jiku raw --service jiku-commands clients.new '{"name":"X"}'
 ```
 
 The subject and inbox prefix are still built for you, because without those nothing answers.
+`--service` takes any service, a module's included (`jiku-docs-queries`).
+
+### Optional modules: the docs module
+
+When a deployment runs the docs module, `jiku docs` works with its documents — and says plainly
+when it is not installed (exit 3) or down (exit 4):
+
+```bash
+jiku docs status                                      # installed? compatible? answering?
+jiku docs search '"integración con aduana"' --filter clientId=4
+jiku docs get /infra/servidores/staging.md > staging.md
+jiku docs put /infra/servidores/staging.md staging.md --base-version 7 --message "Puerto SSH"
+jiku docs edit /infra/servidores/staging.md           # lock, $EDITOR, save, release
+jiku docs sync                                        # mirror ~/JikuDocs both ways
+```
+
+Paths work wherever ids do, every change carries `--base-version`, and `JIKU_VIA=agent` marks an
+agent's writes. [docs/docs-module.md](docs/docs-module.md) is the guide;
+[docs/agents.md](docs/agents.md) the rules for an AI agent using it.
 
 ---
 
@@ -500,9 +520,8 @@ go get github.com/gravadigital/jiku-go@v1
 
 **Covered. A breaking change here requires a new major version:**
 
-- Every exported identifier in the root `jiku` package and in `auth`: types, functions,
-  methods, struct fields,
-  constants, and the sentinel errors.
+- Every exported identifier in the root `jiku` package, `auth`, `events`, `modules` and
+  `modules/docs`: types, functions, methods, struct fields, constants, and the sentinel errors.
 - The documented behaviour of those: which sentinel a failure matches, what `Connect` configures,
   the wire shape `List` and `Get` produce.
 - The `Config` fields and their meaning, and the `JIKU_*` environment variable names.
@@ -520,7 +539,8 @@ go get github.com/gravadigital/jiku-go@v1
   unkeyed composite literals — so use field names, and treat these four types as read-only data
   the server filled in.
 - **The Go version floor** in `go.mod`, which tracks what the dependencies require.
-- `examples/`, `docs/`, `testdata/`, and anything reachable only from a test.
+- `examples/`, `docs/`, `testdata/`, `internal/`, and anything reachable only from a test. For
+  `jiku docs sync`, the command, its flags and its on-disk layout are covered; its engine is not.
 
 **Not ours to promise at all.** Resource names, field names, enum values, page limits, error
 codes, and which role authorises what are **Jiku's** contract, not this library's. They are
@@ -565,6 +585,9 @@ fails the release rather than publishing a version `go get` cannot resolve.
 | [docs/commands.md](docs/commands.md) | field reference for the 23 write commands |
 | [docs/events.md](docs/events.md) | the domain event stream: permissions, filters, delivery |
 | [docs/kv.md](docs/kv.md) | the key-value space: keys, permissions, the bucket, limits |
+| [docs/docs-module.md](docs/docs-module.md) | the docs module: `jiku docs`, the sync daemon, permissions |
+| [docs/agents.md](docs/agents.md) | the rules for an AI agent working with `jiku docs` |
+| [docs/modules.md](docs/modules.md) | the design of the module registry, the docs client and its commands |
 | [docs/sync-jiku.md](docs/sync-jiku.md) | how this client is kept in step with Jiku's contract |
 | [CONTRACT.md](CONTRACT.md) | which commit of Jiku's contract this was last verified against |
 | [CHANGELOG.md](CHANGELOG.md) | what changed in each release |
@@ -583,6 +606,9 @@ help carries the same explanations as these documents.
 /                 package jiku — the library. Its import path IS the module path.
 /auth/            token sources: the device flow and service users
 /events/          package events — the JetStream domain event plane (opt-in)
+/modules/         package modules — the registry of optional modules (opt-in)
+/modules/docs/    package docs — the docs module's client
+/internal/docsync the engine of `jiku docs sync`; not importable, promises nothing
 /cmd/jiku/         the CLI, a thin shell over the library
 /docs/            protocol, auth, library and command-reference guides
 /tools/gendocs/   regenerates docs/commands.md from Jiku's own contract — never hand-edit it
@@ -597,9 +623,10 @@ package and a command — so `import "github.com/gravadigital/jiku-go"` gives yo
 `pkg.go.dev/github.com/gravadigital/jiku-go` is its documentation, with no extra path element to
 guess.
 
-There is no `internal/`, and that is not an omission: `internal/` is *compiler-enforced*
-unimportable from outside the module, so putting the library there would make it impossible to
-consume. It is where shared CLI code would go if `cmd/` grew a second binary.
+The library is not in `internal/`, and that is not an omission: `internal/` is
+*compiler-enforced* unimportable from outside the module, so putting the library there would make
+it impossible to consume. What is there — the sync daemon's engine — is CLI code, kept out of the
+compatibility promise on purpose.
 
 ## Development
 
