@@ -21,9 +21,24 @@ func main() {
 		if !errors.As(err, &silent) {
 			fmt.Fprintln(os.Stderr, "\nerror: "+err.Error())
 		}
-		os.Exit(1)
+		code := 1
+		var coded exitError
+		if errors.As(err, &coded) {
+			code = coded.code
+		}
+		os.Exit(code)
 	}
 }
+
+// exitError carries a specific exit status. Which non-zero status is not a compatibility
+// promise — only zero versus non-zero is — but a script can still tell "the module is not
+// installed" (3) from "the module is down" (4) without parsing text.
+type exitError struct {
+	error
+	code int
+}
+
+func (e exitError) Unwrap() error { return e.error }
 
 // silentError marks an error whose message has already been printed, so it is not printed twice.
 type silentError struct{ error }

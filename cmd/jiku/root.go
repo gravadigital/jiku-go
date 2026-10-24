@@ -102,6 +102,7 @@ Everything here is also a Go library:
 		newCommandCmd(),
 		newEventsCmd(),
 		newKVCmd(),
+		newDocsCmd(),
 		newRawCmd(),
 		newConfigCmd(),
 	)

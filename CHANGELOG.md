@@ -66,6 +66,29 @@ All notable changes to this project are documented here. The format follows
   `CodeShareNotFound`, …), pinned against the module's contracts in both directions, plus
   `CurrentVersion`, `LockHolder`, `IsNotFound` and `Hint`.
 
+- **`jiku docs`: the docs module from the command line.** Generic, the core commands pointed at
+  the module: `status`, `describe`, `query`, `cmd`. Ergonomic, for people and agents: `ls`,
+  `search`, `get` (markdown to stdout, version/checksum/lock to stderr), `put`, `new`, `mv`, `rm`,
+  `restore`, `history`, `lock`, `unlock`, `attach`, `share`, `shares`, `revoke`, `edit` (lock,
+  `$EDITOR`, renewal, save, release) and `sync`. A path works wherever an id does; changes require
+  `--base-version`; ids, checksums, uploads by URL and `via` (from `JIKU_VIA`) are handled. A
+  module that is not installed or incompatible exits 3, one that is down exits 4, with messages
+  that cannot be confused; the specific codes are not a compatibility promise.
+
+- **`jiku docs sync`: a two-way mirror of the documents a person can read.** In `~/JikuDocs/` or a
+  given folder, with the module's paths; `--only` narrows it, `--once` reconciles and exits, `sync
+  status` reports from the local state without connecting. Live notifications bring changes in
+  seconds, replacing files atomically; local edits are uploaded after 2 s of quiet on top of
+  the version they were made from. A local edit is never overwritten: the remote version is
+  written beside it as `<name>.remoto-v<n>.md`, and the file is not uploaded until the person
+  deletes that copy. The change feed is read at start, on every reconnect and every five minutes;
+  a full reconciliation runs on `access.changed`, on `invalid_cursor` and every 24 h. What is no
+  longer readable moves to `.jiku-docs/sin-acceso/`; files in read-only folders are read-only on
+  disk; non-markdown, hidden and editor files are ignored; a local deletion is not propagated. A
+  module that is down means offline; an uninstalled one stops the sync without touching files.
+  State is SQLite through a pure-Go driver (`modernc.org/sqlite`), so the binaries stay static;
+  file events come from `fsnotify`. One daemon per folder, and one identity per folder.
+
 ### Fixed
 
 - **Every plane but core's commands got core's read-plane identity list.** The rule was "the

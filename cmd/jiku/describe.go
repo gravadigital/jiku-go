@@ -53,7 +53,7 @@ than was asked for.
 				return emit(os.Stdout, contract, nil)
 			}
 			if len(args) == 0 {
-				return printContractSummary(contract)
+				return printContractSummary(contract, "jiku describe")
 			}
 			for i, name := range contract.ResourceNames() {
 				if i > 0 {
@@ -75,8 +75,9 @@ than was asked for.
 	return cmd
 }
 
-// printContractSummary is the one-line-per-resource overview.
-func printContractSummary(c *jiku.Contract) error {
+// printContractSummary is the one-line-per-resource overview. command is the command that shows
+// one resource in full, for the closing hint.
+func printContractSummary(c *jiku.Contract, command string) error {
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "RESOURCE\tBASE\tINCL\tFILTER\tSORT\tDEFAULT SORT\tLIMIT/MAX")
 	fmt.Fprintln(tw, "--------\t----\t----\t------\t----\t------------\t---------")
@@ -89,8 +90,8 @@ func printContractSummary(c *jiku.Contract) error {
 	if err := tw.Flush(); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stdout, "\n%d resources. `jiku describe <resource>` for the whitelists.\n",
-		len(c.Resources))
+	fmt.Fprintf(os.Stdout, "\n%d resources. `%s <resource>` for the whitelists.\n",
+		len(c.Resources), command)
 	return nil
 }
 
