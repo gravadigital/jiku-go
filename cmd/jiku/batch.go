@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/gravadigital/jiku-go"
+	"github.com/gravadigital/jiku-go/modules/docs"
 	"github.com/spf13/cobra"
 )
 
@@ -24,6 +25,8 @@ type batchRequest struct {
 	// ID is echoed back on the matching reply. Nothing generates one: it is for a caller that
 	// wants to correlate without counting lines.
 	ID string `json:"id,omitempty"`
+	// Service picks the plane: "core" (the default) or an optional module, "docs".
+	Service string `json:"service,omitempty"`
 }
 
 // batchReply is one line of output. Exactly one of Data and Error is set.
@@ -31,10 +34,11 @@ type batchRequest struct {
 // The envelope is flattened deliberately: a consumer piping this into jq wants the data, and
 // the failure shape that matters — the error CODE — is what it branches on.
 type batchReply struct {
-	ID     string          `json:"id,omitempty"`
-	Method string          `json:"method"`
-	Data   json.RawMessage `json:"data,omitempty"`
-	Error  *batchError     `json:"error,omitempty"`
+	ID      string          `json:"id,omitempty"`
+	Service string          `json:"service,omitempty"`
+	Method  string          `json:"method"`
+	Data    json.RawMessage `json:"data,omitempty"`
+	Error   *batchError     `json:"error,omitempty"`
 }
 
 type batchError struct {
@@ -57,8 +61,13 @@ twenty queries pays it once here.
   {"method":"tasks.list","payload":{"filter":{"projectId":15},"page":{"limit":5}}}
   {"method":"tasks.get","payload":{"id":1368},"id":"the-one-i-care-about"}
 
-Each line is an object with a "method", an optional "payload" (raw JSON, sent as written) and
-an optional "id" echoed back on the reply. Blank lines and lines starting with # are skipped.
+Each line is an object with a "method", an optional "payload" (raw JSON, sent as written), an
+optional "id" echoed back on the reply, and an optional "service": "core" (the default) or
+"docs", the docs module, so reads of both mix over the same connection. The module is looked up
+once, on the first line that names it; if it is not installed or down, those lines fail and the
+rest run. Blank lines and lines starting with # are skipped.
+
+  {"service":"docs","method":"documents.list","payload":{"filter":{"projectId":12}}}
 
   jiku batch < queries.ndjson | jq -c 'select(.error)'
 
@@ -80,7 +89,7 @@ allowed names in it.`,
 			}
 			defer closeClient(client)
 
-			return runBatch(ctx, client, os.Stdin, os.Stdout, stopOnError)
+			return runBatch(ctx, batchPlanes(ctx, client), os.Stdin, os.Stdout, stopOnError)
 		},
 	}
 	cmd.Flags().BoolVar(&stopOnError, "stop-on-error", false,
@@ -88,9 +97,40 @@ allowed names in it.`,
 	return cmd
 }
 
-// batchQuerier is what runBatch needs of a Client, so the loop can be tested without a bus.
+// batchQuerier is what runBatch needs of a plane, so the loop can be tested without a bus.
 type batchQuerier interface {
 	Query(ctx context.Context, method string, payload any) (json.RawMessage, error)
+}
+
+// batchResolver returns the plane a line's "service" names.
+type batchResolver func(service string) (batchQuerier, error)
+
+// batchPlanes resolves "core" to the client and "docs" to the docs module, opening the module
+// once, on first use — a batch that never names it never pays for the registry and the ping. A
+// failure to open it is remembered too, so a module that is down fails each of its lines at once
+// instead of each one waiting out its own ping.
+func batchPlanes(ctx context.Context, client *jiku.Client) batchResolver {
+	var (
+		opened  bool
+		d       *docs.Client
+		openErr error
+	)
+	return func(service string) (batchQuerier, error) {
+		switch service {
+		case "", "core":
+			return client, nil
+		case docs.Module:
+			if !opened {
+				opened = true
+				d, openErr = docs.Open(ctx, client, docs.Options{})
+				if openErr != nil {
+					openErr = docsOpenError(openErr)
+				}
+			}
+			return d, openErr
+		}
+		return nil, fmt.Errorf("unknown service %q: use \"core\" or \"docs\"", service)
+	}
 }
 
 // runBatch is the read-request-reply loop, separated from the command so it can be tested
@@ -98,7 +138,7 @@ type batchQuerier interface {
 //
 // Output is flushed after EVERY reply rather than at the end: a batch is something a person
 // watches, and a buffer that only drains on exit looks like a hang.
-func runBatch(ctx context.Context, client batchQuerier, in *os.File, out *os.File, stopOnError bool) error {
+func runBatch(ctx context.Context, planes batchResolver, in *os.File, out *os.File, stopOnError bool) error {
 	sc := bufio.NewScanner(in)
 	// A reply carrying a large page can exceed bufio's default 64 KB line limit, and so can a
 	// request payload with a long filter. NATS caps a message at 1 MB, so nothing useful is
@@ -134,8 +174,12 @@ func runBatch(ctx context.Context, client batchQuerier, in *os.File, out *os.Fil
 			return err
 		}
 
-		reply := batchReply{ID: req.ID, Method: req.Method}
-		data, err := client.Query(ctx, req.Method, payloadOrNil(req.Payload))
+		reply := batchReply{ID: req.ID, Service: req.Service, Method: req.Method}
+		var data json.RawMessage
+		plane, err := planes(req.Service)
+		if err == nil {
+			data, err = plane.Query(ctx, req.Method, payloadOrNil(req.Payload))
+		}
 		if err != nil {
 			failed++
 			reply.Error = &batchError{Message: err.Error()}

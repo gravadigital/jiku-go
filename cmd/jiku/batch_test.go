@@ -48,7 +48,7 @@ func runBatchOn(t *testing.T, q batchQuerier, input string, stopOnError bool) ([
 		t.Fatal(err)
 	}
 
-	runErr := runBatch(context.Background(), q, in, out, stopOnError)
+	runErr := runBatch(context.Background(), func(string) (batchQuerier, error) { return q, nil }, in, out, stopOnError)
 
 	if _, err := out.Seek(0, 0); err != nil {
 		t.Fatal(err)
@@ -226,4 +226,74 @@ func TestBatchHandlesALongLine(t *testing.T) {
 	if len(replies) != 1 {
 		t.Errorf("got %d replies, want 1: the long line was dropped", len(replies))
 	}
+}
+
+// TestBatchRoutesEachLineToItsService: "service" picks the plane per line, core is the default,
+// and a module that cannot be opened fails only its own lines.
+func TestBatchRoutesEachLineToItsService(t *testing.T) {
+	core := &fakeQuerier{answers: map[string]json.RawMessage{"tasks.list": json.RawMessage(`[1]`)}}
+	docsQ := &fakeQuerier{answers: map[string]json.RawMessage{"documents.list": json.RawMessage(`[2]`)}}
+	route := func(service string) (batchQuerier, error) {
+		switch service {
+		case "", "core":
+			return core, nil
+		case "docs":
+			return docsQ, nil
+		}
+		return nil, fmt.Errorf("unknown service %q", service)
+	}
+	input := `{"method":"tasks.list"}
+{"service":"docs","method":"documents.list"}
+{"service":"core","method":"tasks.list"}
+{"service":"wiki","method":"pages.list"}
+`
+	in, out := pipeFiles(t, input)
+	err := runBatch(context.Background(), route, in, out, false)
+	if err == nil {
+		t.Fatal("an unknown service did not count as a failure")
+	}
+	replies := readReplies(t, out)
+	if len(replies) != 4 || string(replies[0].Data) != "[1]" || string(replies[1].Data) != "[2]" ||
+		replies[1].Service != "docs" || replies[3].Error == nil || !strings.Contains(replies[3].Error.Message, "wiki") {
+		t.Fatalf("%+v", replies)
+	}
+	if strings.Join(core.calls, ",") != "tasks.list,tasks.list" || strings.Join(docsQ.calls, ",") != "documents.list" {
+		t.Fatalf("core %v docs %v", core.calls, docsQ.calls)
+	}
+}
+
+func pipeFiles(t *testing.T, input string) (*os.File, *os.File) {
+	t.Helper()
+	in, err := os.CreateTemp(t.TempDir(), "in-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := in.WriteString(input); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := in.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.CreateTemp(t.TempDir(), "out-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return in, out
+}
+
+func readReplies(t *testing.T, out *os.File) []batchReply {
+	t.Helper()
+	b, err := os.ReadFile(out.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var replies []batchReply
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		var r batchReply
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			t.Fatalf("%q: %v", line, err)
+		}
+		replies = append(replies, r)
+	}
+	return replies
 }

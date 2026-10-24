@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/gravadigital/jiku-go"
 	"github.com/gravadigital/jiku-go/auth"
+	"github.com/gravadigital/jiku-go/modules"
+	"github.com/gravadigital/jiku-go/modules/docs"
 	"github.com/spf13/cobra"
 )
 
@@ -49,7 +52,11 @@ first break:
   authorize   core authorises this caller — a DIFFERENT question from the bus accepting it
 
 Run this first whenever something does not work. Every failure mode of this API produces the
-same symptom from the outside, and each of these links has its own cause and its own fix.`,
+same symptom from the outside, and each of these links has its own cause and its own fix.
+
+Once all five pass, one more line per optional module says whether it is installed, compatible,
+down or available, with its ping time. It is informational: it is not one of the five checks and
+does not change the exit status.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, cancel := signalContext()
@@ -146,6 +153,7 @@ func runDoctor(ctx context.Context) error {
 			rtt, client.InboxPrefix())})
 		report(checkResult{name: "authorize", ok: true, detail: fmt.Sprintf(
 			"core authorised this caller — %d resources visible", len(contract.Resources))})
+		printModules(ctx, out, client)
 		fmt.Fprintf(out, "\n%s\nAll 5 checks passed.\n\nTry:  jiku describe\n      jiku query %s.list --limit 5\n",
 			strings.Repeat("=", 60), firstResource(contract))
 		return nil
@@ -341,4 +349,48 @@ func firstResource(c *jiku.Contract) string {
 		return names[0]
 	}
 	return "projects"
+}
+
+// printModules adds one line per known optional module after core's checks.
+//
+// It is informational: a module is optional, so its absence is not a failure, and it does not
+// count towards core's five checks or change the exit status. It runs only once core's checks
+// have passed, because a module is reached through the same connection and a broken connection
+// would only repeat the earlier failure here.
+func printModules(ctx context.Context, out io.Writer, client *jiku.Client) {
+	fmt.Fprintf(out, "\nmodules (optional; not counted)\n")
+	reg, err := modules.New(client)
+	if err != nil {
+		fmt.Fprintf(out, "  %-10s %s\n", docs.Module, moduleLine(modules.State{}, err))
+		return
+	}
+	st, err := reg.Status(ctx, docs.Module, docs.Protocol)
+	fmt.Fprintf(out, "  %-10s %s\n", docs.Module, moduleLine(st, err))
+}
+
+// moduleLine is the doctor's one line for a module's state.
+func moduleLine(st modules.State, err error) string {
+	if err != nil {
+		line := strings.SplitN(err.Error(), "\n", 2)[0]
+		switch {
+		case errors.Is(err, modules.ErrPermissions):
+			return "unknown — the bus refused the registry or the ping, so this says nothing about " +
+				"the module: " + line + " (`jiku docs status` prints the grant lines)"
+		case errors.Is(err, modules.ErrNoRegistry):
+			return "unknown — the registry bucket " + modules.Bucket + " is missing or unusable: " + line
+		}
+		return "unknown — " + line
+	}
+	switch st.Status {
+	case modules.Available:
+		return fmt.Sprintf("available — %s, ping %s", st.Record.ServiceName, st.Ping.Round(10*time.Microsecond))
+	case modules.Unavailable:
+		return fmt.Sprintf("unavailable — registered as %s and not answering its ping: installed and down",
+			st.Record.ServiceName)
+	case modules.Incompatible:
+		return "incompatible — " + st.Reason
+	case modules.NotInstalled:
+		return "not installed"
+	}
+	return string(st.Status)
 }

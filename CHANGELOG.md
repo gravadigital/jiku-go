@@ -89,6 +89,14 @@ All notable changes to this project are documented here. The format follows
   State is SQLite through a pure-Go driver (`modernc.org/sqlite`), so the binaries stay static;
   file events come from `fsnotify`. One daemon per folder, and one identity per folder.
 
+- **`jiku doctor` reports the docs module** in one informational line after core's checks: not
+  installed, incompatible, unavailable (installed and down), or available with the ping time. It
+  does not count towards the five checks or change the exit status, and a refused registry reads
+  as "unknown", never as "not installed".
+- **`jiku batch` takes a `"service"` per line**: `"core"` (the default) or `"docs"`, so reads of
+  core and of the docs module mix over one connection. The module is opened once, on first use,
+  and a module that cannot be opened fails only its own lines.
+
 ### Fixed
 
 - **Every plane but core's commands got core's read-plane identity list.** The rule was "the

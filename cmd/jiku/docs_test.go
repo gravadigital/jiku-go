@@ -170,3 +170,24 @@ func TestEditKeepsTheTextWhenTheSaveFails(t *testing.T) {
 		t.Fatal("not released after a failed save")
 	}
 }
+
+func TestDoctorModuleLine(t *testing.T) {
+	rec := &modules.Record{ServiceName: "jiku-docs", Protocol: "v1"}
+	cases := []struct {
+		st   modules.State
+		err  error
+		want string
+	}{
+		{modules.State{Status: modules.Available, Record: rec, Ping: 1200 * time.Microsecond}, nil, "available — jiku-docs, ping 1.2ms"},
+		{modules.State{Status: modules.Unavailable, Record: rec}, nil, "installed and down"},
+		{modules.State{Status: modules.NotInstalled}, nil, "not installed"},
+		{modules.State{Status: modules.Incompatible, Reason: "v2"}, nil, "incompatible — v2"},
+		// A refusal says nothing about the module and must not read as "not installed".
+		{modules.State{}, fmt.Errorf("%w: x", modules.ErrPermissions), "unknown — the bus refused"},
+	}
+	for _, c := range cases {
+		if got := moduleLine(c.st, c.err); !strings.Contains(got, c.want) {
+			t.Errorf("%+v %v: %q", c.st, c.err, got)
+		}
+	}
+}
