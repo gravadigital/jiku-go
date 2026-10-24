@@ -356,7 +356,7 @@ func (c *Client) kvError(op, key, subject string, err, permErr error) error {
 			ErrNoBucket, err)
 
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, nats.ErrTimeout):
-		// Not ErrTimeout: that sentinel reads "no reply from core", and core is not involved.
+		// Not ErrTimeout: that sentinel means a request went unanswered, and no request was made.
 		return fmt.Errorf("jiku: kv: %s: JetStream did not answer within %s. Two causes end in this "+
 			"same silence:\n"+
 			"  1. JetStream is slow or down, or the bucket's stream has no leader. Whoever runs the\n"+

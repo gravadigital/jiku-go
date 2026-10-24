@@ -9,6 +9,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **A plane is now something a client is pointed at, not something it assumes.** `Client.On(p)`
+  returns a `PlaneClient` with `Query`, `Command`, `Request`, `List`, `ListInto`, `Get`,
+  `Iterate`, `All`, `Describe` and `Contract` against any plane that speaks core's grammar —
+  core's (`CorePlane()`) or an optional module's (`ModulePlane(serviceName)`). Same connection,
+  identity and inbox. `Client`'s own methods are unchanged and are `On(CorePlane())`.
+  `PlaneClient.Get` takes the whole body, since a module's ids need not be integers.
+  `NewIterator` and `ListFunc` let any page source drive the cursor walk. `ValidServiceName`
+  checks a `{service}` token.
+
 - **A key-value space per identity.** `Client.KV` binds the NATS key-value bucket `JIKU_KV` and
   returns the caller's own space in it, with `Put`, `Get` and `Delete`. Keys are stored as
   `{instance}.{userID}.{key}`: the identity is the second segment, as in every request subject,
@@ -29,6 +38,28 @@ All notable changes to this project are documented here. The format follows
   New sentinels: `ErrKeyNotFound`, `ErrNoBucket`, `ErrValueTooLarge`, `ErrBucketFull`,
   `ErrKVPermissions`. Also `KVBucket`, `KVKey` and `ValidKVKey`, the `jiku kv put|get|delete`
   commands, and [docs/kv.md](docs/kv.md).
+
+### Fixed
+
+- **Every plane but core's commands got core's read-plane identity list.** The rule was "the
+  command plane refuses `actor`, everything else refuses eleven names", which was right only
+  while core's two services were the only ones. A module validates its own payloads, and its
+  contract reserves only `actor`; core's read plane keeps its eleven. Refusing more would refuse
+  what the module accepts.
+- **`Contract()` cached one contract per `Client`.** It is cached per plane now, so a module's
+  contract can never be answered from core's.
+- **Transport errors always blamed core.** "Nothing is listening", the timeout and the bus's
+  refusal now name the service of the subject, and for a module say that an installed module
+  that is down answers exactly like a missing method.
+- **`jiku raw --service` accepted only core's two services**, although its purpose is reaching
+  what nothing else models. It takes any valid service name now, such as `jiku-docs-queries`.
+
+### Changed
+
+- The text of `ErrFailure` and `ErrTimeout` no longer says "core", since a module can be the one
+  that failed or did not answer. Message text is not covered by the compatibility policy; match
+  the sentinels with `errors.Is`, as before.
+- `jiku whoami` adds a line for the docs module's planes, hedged like the other two.
 
 ## [1.3.0] - 2026-09-25
 

@@ -250,6 +250,37 @@ func TestIdentityFieldsAreCheckedPerPlane(t *testing.T) {
 	}
 }
 
+// TestModulePlanesRejectOnlyActor is the regression test for the read plane's list leaking onto
+// every plane that is not core's command plane.
+//
+// The rule was "jiku-commands gets the short list, everything else the long one", which was
+// right only while those were the only two services. A module's planes — the docs module's
+// jiku-docs-queries and jiku-docs-commands — validate their own payloads, and the one key the
+// module's contract reserves is `actor`: a name like `user` or `principal` is the module's to
+// accept or refuse, not this client's. Refusing it locally would make a valid call impossible,
+// which is the failure this package exists to prevent.
+func TestModulePlanesRejectOnlyActor(t *testing.T) {
+	for _, service := range []string{"jiku-docs-queries", "jiku-docs-commands"} {
+		for _, name := range forbiddenQueryIdentityFields {
+			payload := `{"` + name + `":"x"}`
+			_, err := encodePayload(service, payload)
+			if name == "actor" {
+				if !errors.Is(err, ErrInvalidRequest) {
+					t.Errorf("%s accepted %s; actor is reserved on every plane", service, payload)
+				}
+				continue
+			}
+			if err != nil {
+				t.Errorf("%s rejected %s, which only the module may judge: %v", service, payload, err)
+			}
+		}
+	}
+	// Core's read plane keeps all eleven.
+	if _, err := encodePayload(ServiceQueries, `{"principal":"x"}`); err == nil {
+		t.Error("core's read plane stopped rejecting principal")
+	}
+}
+
 // TestCommandActorRejectionExplainsItself: the message has to say why, or the reader concludes
 // their identity fields are all banned and goes looking for a workaround.
 func TestCommandActorRejectionExplainsItself(t *testing.T) {

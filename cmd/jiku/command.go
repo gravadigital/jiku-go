@@ -134,7 +134,11 @@ against the nats CLI.
 
   jiku raw tasks.list '{"page":{"limit":1}}'
   jiku raw --service jiku-commands clients.new '{"name":"Acme"}'
+  jiku raw --service jiku-docs-queries documents.list '{}'   # an optional module's plane
   jiku raw --envelope tasks.list '{}'      # show status/errorCode too, not just data
+
+--service takes any service name: core's two, or a module's ({serviceName}-queries and
+{serviceName}-commands, where the module registry gives serviceName — see ` + "`jiku docs status`" + `).
 
 The subject is still built for you — ` + "`{instance}.{your sub}.{service}.v1.{method}`" + ` — and the
 inbox prefix is still set, because without those two nothing would answer at all.`,
@@ -148,9 +152,10 @@ inbox prefix is still set, because without those two nothing would answer at all
 			if err != nil {
 				return err
 			}
-			if service != jiku.ServiceQueries && service != jiku.ServiceCommands {
-				return fmt.Errorf("unknown service %q; use %s or %s",
-					service, jiku.ServiceQueries, jiku.ServiceCommands)
+			if err := jiku.ValidServiceName(service); err != nil {
+				return fmt.Errorf("%w\n  core's planes are %s and %s; a module's are "+
+					"{serviceName}-queries and {serviceName}-commands", err,
+					jiku.ServiceQueries, jiku.ServiceCommands)
 			}
 
 			client, err := connect(ctx)
@@ -183,7 +188,7 @@ inbox prefix is still set, because without those two nothing would answer at all
 		},
 	}
 	cmd.Flags().StringVar(&service, "service", jiku.ServiceQueries,
-		"which plane: jiku-queries or jiku-commands")
+		"the service to publish to: jiku-queries, jiku-commands, or a module's (e.g. jiku-docs-queries)")
 	cmd.Flags().BoolVar(&envelope, "envelope", false, "print the whole envelope, not just data")
 	return cmd
 }

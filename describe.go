@@ -3,7 +3,6 @@ package jiku
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -197,48 +196,23 @@ type EnumValue struct {
 	Label string `json:"label,omitempty"`
 }
 
-// Describe fetches the contract, for all resources or for the named ones.
+// Describe fetches core's contract, for all resources or for the named ones. For a module's
+// contract, use On(plane).Describe.
 //
 // An EMPTY (non-nil) resources slice is invalid_fields on the server, not "all" — so nil and
 // empty are collapsed here to mean "all", which is what a caller passing no arguments means.
-func (c *Client) Describe(ctx context.Context, resources ...string) (contract *Contract, err error) {
-	payload := map[string]any{}
-	if len(resources) > 0 {
-		payload["resources"] = resources
-	}
-	contract = &Contract{}
-	trace, err := c.queryInto(ctx, "meta.describe", payload, contract)
-	defer func() { c.finishTrace(ctx, trace, err) }()
-	var shape *shapeError
-	if errors.As(err, &shape) {
-		return nil, fmt.Errorf("jiku: decoding the meta.describe reply: %w", shape.err)
-	}
-	if err != nil {
-		return nil, err
-	}
-	return contract, nil
+func (c *Client) Describe(ctx context.Context, resources ...string) (*Contract, error) {
+	return c.On(CorePlane()).Describe(ctx, resources...)
 }
 
-// Contract returns the full contract, fetching it once per client and caching it.
+// Contract returns core's full contract, fetching it once per client and caching it. For a
+// module's, use On(plane).Contract, which is cached separately.
 //
 // The cache is per Client, so it lives as long as the connection and no longer. Nothing is
 // written to disk here: a contract cached across runs is a contract that can be wrong after a
 // deploy, and this one costs a single request that touches no database.
 func (c *Client) Contract(ctx context.Context) (*Contract, error) {
-	c.mu.Lock()
-	cached := c.contract
-	c.mu.Unlock()
-	if cached != nil {
-		return cached, nil
-	}
-	contract, err := c.Describe(ctx)
-	if err != nil {
-		return nil, err
-	}
-	c.mu.Lock()
-	c.contract = contract
-	c.mu.Unlock()
-	return contract, nil
+	return c.On(CorePlane()).Contract(ctx)
 }
 
 // ResourceNames lists the resources in the contract, sorted.

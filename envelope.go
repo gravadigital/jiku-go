@@ -11,13 +11,14 @@ import (
 // Sentinel errors for the failure classes a caller can act on with errors.Is.
 var (
 	// ErrInvalidRequest is a request this library rejected locally, before publishing,
-	// because core would answer invalid_fields. Fix the call.
+	// because the service would answer invalid_fields. Fix the call.
 	ErrInvalidRequest = errors.New("jiku: invalid request")
-	// ErrFailure is a `status: failure` reply. Inspect it as *Error for the code.
-	ErrFailure = errors.New("jiku: core answered failure")
+	// ErrFailure is a `status: failure` reply, from core or from a module. Inspect it as
+	// *Error for the code.
+	ErrFailure = errors.New("jiku: the service answered failure")
 	// ErrTimeout is a bus timeout: no reply arrived. On this bus the first suspect is a
-	// wrong inbox prefix, not a slow core — see InboxPrefix.
-	ErrTimeout = errors.New("jiku: no reply from core")
+	// wrong inbox prefix, not a slow service — see InboxPrefix.
+	ErrTimeout = errors.New("jiku: no reply")
 	// ErrNotConnected is use of a Client that was closed or never connected.
 	ErrNotConnected = errors.New("jiku: not connected")
 	// ErrNoEndpoint means nothing is subscribed to the subject: the bus said so immediately,

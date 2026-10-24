@@ -30,8 +30,9 @@ type Iterator struct {
 
 	// list fetches one page. It is a field rather than a direct call to Client.List so the
 	// page sequence can be driven in a test without a bus — the termination rule below is
-	// the whole reason this type exists, and it is not testable against a live server.
-	list func(ctx context.Context, resource string, q List) (*Collection, error)
+	// the whole reason this type exists, and it is not testable against a live server — and
+	// so the same walk serves every plane.
+	list ListFunc
 
 	items []json.RawMessage
 	pos   int
@@ -45,11 +46,21 @@ type Iterator struct {
 	seen  int
 }
 
-// Iterate returns an Iterator over every page of a list.
+// ListFunc fetches one page of a list. Client.List and PlaneClient.List are ListFuncs.
+type ListFunc func(ctx context.Context, resource string, q List) (*Collection, error)
+
+// Iterate returns an Iterator over every page of a list on core's read plane.
 //
 // Nothing is requested until the first call to Next.
 func (c *Client) Iterate(ctx context.Context, resource string, q List) *Iterator {
-	return &Iterator{ctx: ctx, resource: resource, query: q, list: c.List}
+	return NewIterator(ctx, resource, q, c.List)
+}
+
+// NewIterator returns an Iterator that fetches its pages with list. It is how a wrapper around a
+// plane — or a test with no bus — gets the cursor-following walk and its termination rule,
+// which a hand-rolled loop tends to get wrong. Nothing is requested until the first Next.
+func NewIterator(ctx context.Context, resource string, q List, list ListFunc) *Iterator {
+	return &Iterator{ctx: ctx, resource: resource, query: q, list: list}
 }
 
 // Next advances to the next item, fetching the next page when the current one runs out. It
@@ -135,8 +146,12 @@ func (it *Iterator) Count() int { return it.seen }
 // element: this walks every page of a collection, so the per-item cost is multiplied by the
 // whole sweep rather than by one page.
 func (c *Client) All(ctx context.Context, resource string, q List, dest any) error {
+	return allInto(c.Iterate(ctx, resource, q), dest)
+}
+
+// allInto drains an iterator into dest. Shared by every plane's All.
+func allInto(it *Iterator, dest any) error {
 	var raw []json.RawMessage
-	it := c.Iterate(ctx, resource, q)
 	for it.Next() {
 		raw = append(raw, it.Item().Raw)
 	}

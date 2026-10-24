@@ -88,6 +88,7 @@ claims so it can tell you what identity and roles are being presented.`,
 			q, c, note := planeAccess(roles)
 			fmt.Fprintf(tw, "queries (%s)\t%s\n", jiku.ServiceQueries, q)
 			fmt.Fprintf(tw, "commands (%s)\t%s\n", jiku.ServiceCommands, c)
+			fmt.Fprintf(tw, "docs module\t%s\n", docsAccess(roles))
 			if err := tw.Flush(); err != nil {
 				return err
 			}
@@ -97,6 +98,34 @@ claims so it can tell you what identity and roles are being presented.`,
 			return nil
 		},
 	}
+}
+
+// docsAccess describes what a set of roles is USUALLY allowed on the docs module's planes.
+//
+// Same hedging as planeAccess, for the same reason: the callout's templates decide, and the
+// module itself decides again by folder. Whether the module is installed at all is not known
+// here — whoami makes no connection — so the line says how to find out.
+func docsAccess(roles []string) string {
+	has := func(want string) bool {
+		for _, r := range roles {
+			if r == want {
+				return true
+			}
+		}
+		return false
+	}
+	const status = "; `jiku docs status` says whether it is installed"
+	switch {
+	case has("internal-app"):
+		return "usually reads and writes everything, as a service" + status
+	case has("admin"), has("user"):
+		return "usually reads and writes, per folder ACL; live notifications" + status
+	case has("external-user"):
+		return "usually reads only: public documents of your projects, no notifications" + status
+	case has("core"), has("bus-observer"):
+		return "none"
+	}
+	return "unknown" + status
 }
 
 // planeAccess describes what a set of roles is USUALLY allowed on each plane.

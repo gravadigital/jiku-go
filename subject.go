@@ -22,6 +22,55 @@ const (
 	ServiceCommands = "jiku-commands"
 )
 
+// Plane names the two micro services of one request/reply plane that speaks core's grammar:
+// the same subjects, envelope, filters, cursors and meta.describe.
+//
+// Core is one plane. An optional module is another: a module registered with
+// `serviceName: S` serves `S-queries` and `S-commands` (see the modules package). Point a
+// Client at one with On.
+type Plane struct {
+	// Queries is the read service, e.g. "jiku-queries" or "jiku-docs-queries".
+	Queries string
+	// Commands is the write service, e.g. "jiku-commands" or "jiku-docs-commands".
+	Commands string
+}
+
+// CorePlane is core's plane: ServiceQueries and ServiceCommands. Every Client method that does
+// not take a Plane uses it.
+func CorePlane() Plane { return Plane{Queries: ServiceQueries, Commands: ServiceCommands} }
+
+// ModulePlane is the plane of a module whose registry record names serviceName. The suffixes
+// are the module registry's convention, not this client's choice.
+func ModulePlane(serviceName string) Plane {
+	return Plane{Queries: serviceName + "-queries", Commands: serviceName + "-commands"}
+}
+
+// IsCore reports whether p is core's plane.
+func (p Plane) IsCore() bool { return p == CorePlane() }
+
+// ValidServiceName reports whether name can be the {service} token of a subject: lower-case
+// letters, digits and dashes, starting with a letter. Anything else — a dot, a wildcard, a
+// space — would change the subject's shape instead of naming a service.
+func ValidServiceName(name string) error {
+	if name == "" {
+		return fmt.Errorf("%w: a service name cannot be empty", ErrInvalidRequest)
+	}
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case (r >= '0' && r <= '9') || r == '-':
+			if i == 0 {
+				return fmt.Errorf("%w: the service name %q must start with a letter",
+					ErrInvalidRequest, name)
+			}
+		default:
+			return fmt.Errorf("%w: the service name %q contains %q; a service is one subject "+
+				"token of lower-case letters, digits and dashes", ErrInvalidRequest, name, r)
+		}
+	}
+	return nil
+}
+
 // ProtocolVersion is the {version} token of the subject grammar.
 const ProtocolVersion = "v1"
 
@@ -117,10 +166,24 @@ var forbiddenCommandFields = []string{"actor"}
 
 // checkNoIdentityFields reports the first forbidden key present in a payload, for the given
 // service.
+//
+// Only CORE'S READ PLANE gets the eleven names. Every other service — core's command plane and
+// both planes of any module — gets the short list, `actor` alone. A module validates its own
+// payloads against its own contract, and its contract reserves `actor` for the api exactly as
+// core's does; any other name is the module's to accept or refuse. This rule used to read "the
+// command plane gets the short list, everything else the long one", which silently applied
+// core's read-plane list to every module.
 func checkNoIdentityFields(service string, payload map[string]any) error {
-	if service == ServiceCommands {
+	if service != ServiceQueries {
 		for _, name := range forbiddenCommandFields {
 			if _, ok := payload[name]; ok {
+				if service != ServiceCommands {
+					return fmt.Errorf(
+						"%w: %q is the reserved identity envelope, and %s accepts it only from the "+
+							"api's own service user — anybody else is answered invalid_fields. Your "+
+							"identity is already the token's `sub` in the subject.",
+						ErrInvalidRequest, name, service)
+				}
 				return fmt.Errorf(
 					"%w: %q is the reserved identity envelope of the command plane, and only the "+
 						"api's own service user may carry it — core answers invalid_fields to "+

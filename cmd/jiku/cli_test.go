@@ -327,3 +327,17 @@ func TestReadValueSources(t *testing.T) {
 		t.Errorf("both inline and --value-file = %v, want an error saying to pass only one", err)
 	}
 }
+
+// TestDocsAccessNeverClaimsInstallation: whoami makes no connection, so it cannot know whether
+// the docs module exists. Every line a role can reach must point at the command that does know.
+func TestDocsAccessNeverClaimsInstallation(t *testing.T) {
+	for _, roles := range [][]string{{"admin"}, {"user"}, {"external-user"}, {"internal-app"}, {"x"}} {
+		got := docsAccess(roles)
+		if !strings.Contains(got, "jiku docs status") || !strings.Contains(got, "usually") && roles[0] != "x" {
+			t.Errorf("docsAccess(%v) = %q", roles, got)
+		}
+	}
+	if got := docsAccess([]string{"external-user"}); !strings.Contains(got, "reads only") {
+		t.Errorf("external-user: %q", got)
+	}
+}

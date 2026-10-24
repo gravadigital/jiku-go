@@ -26,9 +26,11 @@ type Client struct {
 	nc     *nats.Conn
 	userID string
 
-	mu       sync.Mutex
-	contract *Contract
-	kv       *KV
+	mu sync.Mutex
+	// contracts caches one meta.describe per plane, keyed by the plane's query service. A
+	// single field served while core was the only plane; a module has a contract of its own.
+	contracts map[string]*Contract
+	kv        *KV
 
 	connectTrace ConnectTrace
 
@@ -330,8 +332,8 @@ func (c *Client) request(ctx context.Context, service, method string, payload an
 
 // queryInto runs a query and decodes the envelope and its data in one pass, the data landing
 // in dest. See decodeInto for why that is worth a separate path.
-func (c *Client) queryInto(ctx context.Context, method string, payload, dest any) (*RequestTrace, error) {
-	msg, trace, err := c.roundTrip(ctx, ServiceQueries, method, payload)
+func (c *Client) queryInto(ctx context.Context, service, method string, payload, dest any) (*RequestTrace, error) {
+	msg, trace, err := c.roundTrip(ctx, service, method, payload)
 	if err != nil {
 		return trace, err
 	}
@@ -458,43 +460,72 @@ func nonNilPointer(dest any) error {
 	return nil
 }
 
+// subjectService returns the {service} token of a request subject, or "" when the subject does
+// not follow the grammar.
+func subjectService(subject string) string {
+	parts := strings.SplitN(subject, ".", 5)
+	if len(parts) < 5 {
+		return ""
+	}
+	return parts[2]
+}
+
+// servedBy names who serves a service, for a message: core for core's two, the service itself
+// for anything else.
+func servedBy(service string) string {
+	if service == ServiceQueries || service == ServiceCommands || service == "" {
+		return "core"
+	}
+	return service
+}
+
 // requestError explains the two ways a request fails on the transport, both of which are
 // routinely misdiagnosed.
 func requestError(c *Client, subject, method string, err error) error {
+	service := subjectService(subject)
+	who := servedBy(service)
 	switch {
 	case errors.Is(err, nats.ErrNoResponders):
 		// Distinctly better news than a timeout: the server answered AT ONCE that nothing is
-		// subscribed to this subject. So it is not a slow core and not the inbox — the subject
-		// itself reaches nobody, which almost always means the method does not exist.
+		// subscribed to this subject. So it is not a slow service and not the inbox — the
+		// subject itself reaches nobody, which almost always means the method does not exist,
+		// or, for a module, that the module is not running.
 		resource, operation, _ := SplitMethod(method)
 		var b strings.Builder
 		fmt.Fprintf(&b, "nothing is listening on %s\n", method)
-		b.WriteString("  The bus answered immediately that no endpoint is registered for that " +
-			"subject, so this is\n  neither a slow core nor an inbox problem:\n")
-		b.WriteString("    - is the method spelled right? core answers only what it registers, " +
-			"and no subject\n      here carries a wildcard")
+		fmt.Fprintf(&b, "  The bus answered immediately that no endpoint is registered for that "+
+			"subject, so this is\n  neither a slow %s nor an inbox problem:\n", who)
+		fmt.Fprintf(&b, "    - is the method spelled right? %s answers only what it registers, "+
+			"and no subject\n      here carries a wildcard", who)
 		if operation != "" {
 			fmt.Fprintf(&b, " (read as resource %q, operation %q)", resource, operation)
 		}
 		b.WriteString("\n    - is it on the right plane? queries and commands are separate " +
 			"services\n")
 		fmt.Fprintf(&b, "    - is the instance right? this asked on %q\n", subject)
-		b.WriteString("  `jiku describe` lists the reads core serves; the 23 commands are in " +
-			"docs/commands.md.")
+		if who == "core" {
+			b.WriteString("  `jiku describe` lists the reads core serves; the 23 commands are in " +
+				"docs/commands.md.")
+		} else {
+			fmt.Fprintf(&b, "    - is %s running at all? A module that is installed but down "+
+				"answers exactly like this.\n", who)
+			b.WriteString("  Its own meta.describe lists the reads it serves; the module " +
+				"registry says whether it is up\n  (`jiku docs status` for the docs module).")
+		}
 		// %w, not %s: a caller must be able to branch on this with errors.Is.
 		return fmt.Errorf("%w: %s", ErrNoEndpoint, b.String())
 
 	case errors.Is(err, nats.ErrTimeout), errors.Is(err, context.DeadlineExceeded):
 		return fmt.Errorf(
 			"%w: %s did not answer within %s\n"+
-				"  Nothing replied, which on this bus is usually NOT a slow core:\n"+
+				"  Nothing replied, which on this bus is usually NOT a slow %s:\n"+
 				"    - is the instance right? This asked on %q — a wrong instance means nobody "+
 				"is subscribed\n"+
-				"    - is the method right? `jiku describe` lists what core serves\n"+
-				"    - is core running and subscribed?\n"+
+				"    - is the method right? the plane's meta.describe lists what it serves\n"+
+				"    - is %s running and subscribed?\n"+
 				"  (The inbox prefix, the other classic cause, is set correctly by this client: "+
 				"%s)",
-			ErrTimeout, method, c.cfg.Timeout, subject, c.InboxPrefix())
+			ErrTimeout, method, c.cfg.Timeout, who, subject, who, c.InboxPrefix())
 	case errors.Is(err, nats.ErrPermissionViolation),
 		strings.Contains(err.Error(), "Permissions Violation"):
 		return permissionError(c, subject, method, err)
@@ -503,40 +534,52 @@ func requestError(c *Client, subject, method string, err error) error {
 }
 
 // permissionError explains a refusal by the BUS, which is a different thing from a refusal by
-// core and has a different fix.
+// the service and has a different fix.
 //
-// The distinction is worth spelling out every time: the bus refuses by subject, before core sees
-// anything; core refuses by role and by its own `users` table, after. A caller who confuses the
-// two goes looking in the wrong service.
+// The distinction is worth spelling out every time: the bus refuses by subject, before the
+// service sees anything; core (or a module) refuses by role and by its own records, after. A
+// caller who confuses the two goes looking in the wrong place.
 func permissionError(c *Client, subject, method string, err error) error {
+	service := subjectService(subject)
+	who := servedBy(service)
 	plane := "that subject"
-	if strings.Contains(subject, "."+ServiceCommands+".") {
+	switch {
+	case service == ServiceCommands:
 		plane = "the COMMAND plane"
-	} else if strings.Contains(subject, "."+ServiceQueries+".") {
+	case service == ServiceQueries:
 		plane = "the QUERY plane"
+	case strings.HasSuffix(service, "-commands"):
+		plane = "the COMMAND plane of " + service
+	case strings.HasSuffix(service, "-queries"):
+		plane = "the QUERY plane of " + service
+	}
+	note := "  differ per method within a role: `external-user`, for instance, reaches a handful of\n" +
+		"  commands only through the api, never by publishing to this plane directly.\n"
+	if who != "core" {
+		note = "  differ per plane within a role: a module's planes are granted line by line, next to\n" +
+			"  core's, and a role may reach a module's reads without its writes.\n"
 	}
 	return fmt.Errorf(
 		"jiku: the bus refused to publish %s (%s)\n"+
 			"  %s\n"+
-			"  This is the BUS refusing by subject, not core refusing by role — the message never\n"+
-			"  reached core at all, so nothing about core's authorisation is implied either way.\n"+
+			"  This is the BUS refusing by subject, not %s refusing by role — the message never\n"+
+			"  reached %s at all, so nothing about its authorisation is implied either way.\n"+
 			"  Your token's role selected a permission template that does not grant %s.\n"+
 			"  Which roles may publish which plane is the deployment's choice, set in the\n"+
 			"  auth-callout's template for your role — not a property of this client, and it can\n"+
-			"  differ per method within a role: `external-user`, for instance, reaches a handful of\n"+
-			"  commands only through the api, never by publishing to this plane directly.\n"+
+			"%s"+
 			"  `jiku whoami` shows your roles and `jiku doctor` reports what they actually reach.",
-		method, subject, err, plane)
+		method, subject, err, who, who, plane, note)
 }
 
-// Query publishes to the read plane and returns the envelope's data, or a *Error on failure.
+// Query publishes to core's read plane and returns the envelope's data, or a *Error on failure.
+// For a module's read plane, use On(plane).Query.
 func (c *Client) Query(ctx context.Context, method string, payload any) (json.RawMessage, error) {
-	data, trace, err := c.do(ctx, ServiceQueries, method, payload)
-	c.finishTrace(ctx, trace, err)
-	return data, err
+	return c.On(CorePlane()).Query(ctx, method, payload)
 }
 
-// Command publishes to the write plane and returns the envelope's data, or a *Error on failure.
+// Command publishes to core's write plane and returns the envelope's data, or a *Error on
+// failure. For a module's write plane, use On(plane).Command.
 //
 // # A COMMAND IS NOT THE MIRROR IMAGE OF A QUERY
 //
@@ -553,9 +596,7 @@ func (c *Client) Query(ctx context.Context, method string, payload any) (json.Ra
 //   - There is no JetStream and no retry. If core is down the request times out and the
 //     operation did not happen.
 func (c *Client) Command(ctx context.Context, method string, payload any) (json.RawMessage, error) {
-	data, trace, err := c.do(ctx, ServiceCommands, method, payload)
-	c.finishTrace(ctx, trace, err)
-	return data, err
+	return c.On(CorePlane()).Command(ctx, method, payload)
 }
 
 // do runs a request and turns a failure envelope into an error. The caller reports the trace,
@@ -571,7 +612,7 @@ func (c *Client) do(ctx context.Context, service, method string, payload any) (j
 	return reply.Data, trace, nil
 }
 
-// List runs a `{resource}.list`.
+// List runs a `{resource}.list` on core's read plane.
 //
 //	col, err := c.List(ctx, "tasks", jiku.List{
 //	    Filter: jiku.F{"projectId": 15},
@@ -580,18 +621,8 @@ func (c *Client) do(ctx context.Context, service, method string, payload any) (j
 //	})
 //	var tasks []Task
 //	err = col.Into(&tasks)
-func (c *Client) List(ctx context.Context, resource string, q List) (col *Collection, err error) {
-	data, trace, err := c.do(ctx, ServiceQueries, resource+".list", q.payload())
-	defer func() { c.finishTrace(ctx, trace, err) }()
-	if err != nil {
-		return nil, err
-	}
-	defer trace.unwrapFrom(time.Now())
-	col = &Collection{}
-	if err := json.Unmarshal(data, col); err != nil {
-		return nil, fmt.Errorf("jiku: decoding the %s.list reply: %w", resource, err)
-	}
-	return col, nil
+func (c *Client) List(ctx context.Context, resource string, q List) (*Collection, error) {
+	return c.On(CorePlane()).List(ctx, resource, q)
 }
 
 // ListInto runs a `{resource}.list` and decodes the items straight into dest, returning the
@@ -604,20 +635,8 @@ func (c *Client) List(ctx context.Context, resource string, q List) (col *Collec
 // items in a single pass — for the common case where the caller already knows the shape they
 // want. Use List when the items are to be passed
 // around as raw JSON, or when the page is needed before deciding how to decode.
-func (c *Client) ListInto(ctx context.Context, resource string, q List, dest any) (page Page, err error) {
-	if err := nonNilPointer(dest); err != nil {
-		return Page{}, err
-	}
-	trace, err := c.queryInto(ctx, resource+".list", q.payload(), listDest(dest, &page))
-	defer func() { c.finishTrace(ctx, trace, err) }()
-	var shape *shapeError
-	if errors.As(err, &shape) {
-		return page, fmt.Errorf("jiku: decoding %s items into %T: %w", resource, dest, shape.err)
-	}
-	if err != nil {
-		return Page{}, err
-	}
-	return page, nil
+func (c *Client) ListInto(ctx context.Context, resource string, q List, dest any) (Page, error) {
+	return c.On(CorePlane()).ListInto(ctx, resource, q, dest)
 }
 
 // listDest is where a list reply's data lands for ListInto: the items into the caller's
@@ -629,16 +648,12 @@ func listDest(dest any, page *Page) any {
 	}{Items: dest, Page: page}
 }
 
-// Get runs a `{resource}.get`.
+// Get runs a `{resource}.get` on core's read plane.
 //
 // A *_not_found does not distinguish "does not exist" from "you may not see it", on purpose:
 // telling them apart would confirm to an external caller that the record exists.
 func (c *Client) Get(ctx context.Context, resource string, q Get) (*Item, error) {
-	data, err := c.Query(ctx, resource+".get", q.payload())
-	if err != nil {
-		return nil, err
-	}
-	return &Item{Raw: data}, nil
+	return c.On(CorePlane()).Get(ctx, resource, q.payload())
 }
 
 // Tags runs `requirements.tags`, the one query with a shape of its own. It is not paginated.
@@ -650,7 +665,7 @@ func (c *Client) Tags(ctx context.Context, projectID int64, key string) (groups 
 	var out struct {
 		Items []TagGroup `json:"items"`
 	}
-	trace, err := c.queryInto(ctx, "requirements.tags", map[string]any{"filter": filter}, &out)
+	trace, err := c.queryInto(ctx, ServiceQueries, "requirements.tags", map[string]any{"filter": filter}, &out)
 	defer func() { c.finishTrace(ctx, trace, err) }()
 	var shape *shapeError
 	if errors.As(err, &shape) {
