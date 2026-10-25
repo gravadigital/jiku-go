@@ -49,6 +49,9 @@ All notable changes to this project are documented here. The format follows
   bus drops a refused publish, so the two look identical from the outside, and the connection's
   last error is checked to tell them apart. `RequiredPermissions` prints the grant lines. The
   bucket must have `allow_direct`, so a read can be granted key by key.
+  An identity that may read the registry but not ping — Jiku's person templates, on purpose —
+  gets `available` with `State.Unverified` set; a module that is down then shows on the first
+  request as `jiku.ErrNoEndpoint`, which `jiku docs` exits with 4, like `status` does.
 
 - **Package `modules/docs`: a client for the docs module.** `Open` reads the registry, checks
   the protocol, pings the module, and returns a client on the plane the registry names — never on

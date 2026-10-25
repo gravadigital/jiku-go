@@ -191,3 +191,13 @@ func TestDoctorModuleLine(t *testing.T) {
 		}
 	}
 }
+
+// TestDocsErrorTreatsNoEndpointAsDown: an identity that may not ping learns the module is down from
+// its first request. It must exit like `jiku docs status` does for a module that is down.
+func TestDocsErrorTreatsNoEndpointAsDown(t *testing.T) {
+	err := docsError(fmt.Errorf("%w: nothing is listening", jiku.ErrNoEndpoint))
+	var coded exitError
+	if !errors.As(err, &coded) || coded.code != exitModuleDown || !errors.Is(err, jiku.ErrNoEndpoint) {
+		t.Fatalf("got %v", err)
+	}
+}

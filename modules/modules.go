@@ -123,8 +123,13 @@ type State struct {
 	Status Status
 	// Record is the registry key, nil when NotInstalled or unreadable.
 	Record *Record
-	// Ping is the ping's round trip, set when Available.
+	// Ping is the ping's round trip, set when Available and not Unverified.
 	Ping time.Duration
+	// Unverified is set with Available when the bus does not let this identity ping the module:
+	// the key is there and the protocol matches, but whether it answers is only known on the
+	// first request (a module that is down answers jiku.ErrNoEndpoint). Jiku's person templates
+	// grant the registry and not the ping, on purpose.
+	Unverified bool
 	// Reason says why, in words for a person, when Status is not Available.
 	Reason string
 }
@@ -225,8 +230,8 @@ func (r *Registry) Ping(ctx context.Context, serviceName string) (time.Duration,
 // it.
 //
 // A module that is absent, incompatible or down is a State, not an error. The error is for what
-// prevents knowing: the bus refused the registry or the ping (ErrPermissions), or the bucket is
-// missing (ErrNoRegistry).
+// prevents knowing: the bus refused the registry (ErrPermissions), or the bucket is missing
+// (ErrNoRegistry). A refused ping is not an error: the state is Available with Unverified set.
 func (r *Registry) Status(ctx context.Context, module, protocol string) (State, error) {
 	st := State{Module: module}
 	rec, err := r.Get(ctx, module)
@@ -257,6 +262,12 @@ func (r *Registry) Status(ctx context.Context, module, protocol string) (State, 
 		st.Reason = fmt.Sprintf("the module is registered as %q but nothing answered "+
 			"$SRV.PING.%s-queries: it is installed and down. %s", rec.ServiceName, rec.ServiceName,
 			"Restart it, or ask whoever runs it; a registered module is never removed by a shutdown")
+		return st, nil
+	case errors.Is(err, ErrPermissions):
+		st.Status = Available
+		st.Unverified = true
+		st.Reason = fmt.Sprintf("this identity may read the registry but not ping $SRV.PING.%s-queries, "+
+			"so whether the module answers is known on the first request", rec.ServiceName)
 		return st, nil
 	case err != nil:
 		return st, err

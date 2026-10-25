@@ -117,10 +117,15 @@ func docsOpenError(err error) error {
 	return err
 }
 
-// docsError appends the module's advice to a failure whose fix is not obvious from its code.
+// docsError appends the module's advice to a failure whose fix is not obvious from its code. No
+// endpoint on the module's plane is the module being down: an identity that may not ping finds
+// out here, and it exits like `jiku docs status` would.
 func docsError(err error) error {
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, jiku.ErrNoEndpoint) {
+		return exitError{code: exitModuleDown, error: err}
 	}
 	if h := docs.Hint(err); h != "" {
 		return fmt.Errorf("%w\n  %s", err, h)
@@ -217,6 +222,7 @@ type moduleStateJSON struct {
 	Protocol     string     `json:"protocol,omitempty"`
 	RegisteredAt *time.Time `json:"registeredAt,omitempty"`
 	PingMs       *float64   `json:"pingMs,omitempty"`
+	Unverified   bool       `json:"unverified,omitempty"`
 	Reason       string     `json:"reason,omitempty"`
 }
 
@@ -229,7 +235,8 @@ func moduleStateOf(st modules.State) moduleStateJSON {
 			out.RegisteredAt = &t
 		}
 	}
-	if st.Status == modules.Available {
+	out.Unverified = st.Unverified
+	if st.Status == modules.Available && !st.Unverified {
 		ms := float64(st.Ping.Microseconds()) / 1000
 		out.PingMs = &ms
 	}
@@ -251,7 +258,10 @@ func printModuleState(cmd *cobra.Command, st modules.State) error {
 			fmt.Fprintf(tw, "registered\t%s\n", st.Record.RegisteredAt.Format(time.RFC3339))
 		}
 	}
-	if st.Status == modules.Available {
+	switch {
+	case st.Status == modules.Available && st.Unverified:
+		fmt.Fprintf(tw, "ping\tnot allowed for this identity\n")
+	case st.Status == modules.Available:
 		fmt.Fprintf(tw, "ping\t%s\n", st.Ping.Round(10*time.Microsecond))
 	}
 	if st.Reason != "" {

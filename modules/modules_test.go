@@ -91,14 +91,12 @@ func TestStatusPingsTheQueriesService(t *testing.T) {
 	}
 }
 
-// TestStatusDoesNotHideARefusal: a refused ping or a refused registry read must come back as an
-// error. Reported as Unavailable or NotInstalled, it would send the reader to restart a module
-// that is running fine.
+// TestStatusDoesNotHideARefusal: a refused registry read must come back as an error. Reported as
+// NotInstalled, it would send the reader to install a module that is running fine.
 func TestStatusDoesNotHideARefusal(t *testing.T) {
 	for _, b := range []*fakeBackend{
 		{getErr: ErrPermissions},
 		{getErr: ErrNoRegistry},
-		{value: []byte(docsKey), pingErr: ErrPermissions},
 	} {
 		st, err := (&Registry{b: b}).Status(context.Background(), "docs", "v1")
 		if err == nil {
@@ -187,5 +185,19 @@ func TestWatchReportsThePresentFirst(t *testing.T) {
 	got = drain(t, []jetstream.KeyValueEntry{nil, fakeEntry{op: jetstream.KeyValuePut, value: []byte("{")}})
 	if len(got) != 2 || !errors.Is(got[1].Err, ErrIncompatible) {
 		t.Fatalf("bad key: %+v", got)
+	}
+}
+
+// TestStatusWithARefusedPingIsUnverified: Jiku's person templates grant the registry and not the
+// ping. That identity must still get a usable module, never Unavailable (which would send it to
+// restart a module that is running fine) and never an error (which would stop every command).
+func TestStatusWithARefusedPingIsUnverified(t *testing.T) {
+	st, err := (&Registry{b: &fakeBackend{value: []byte(docsKey), pingErr: ErrPermissions}}).
+		Status(context.Background(), "docs", "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Status != Available || !st.Unverified || st.Record == nil || st.Err() != nil {
+		t.Fatalf("got %+v", st)
 	}
 }
