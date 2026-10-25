@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 
 	"github.com/gravadigital/jiku-go"
 	"github.com/gravadigital/jiku-go/auth"
+	"github.com/gravadigital/jiku-go/internal/systemd"
 	"github.com/spf13/cobra"
 )
 
@@ -90,12 +92,31 @@ no login is needed at all: the key mints a token whenever one is wanted.`,
 			if tokens.RefreshToken == "" {
 				fmt.Fprint(os.Stderr, noRefreshTokenWarning)
 			}
-			fmt.Fprintf(os.Stderr, "  stored   %s\n\nNext: jiku doctor\n", store.Location())
+			fmt.Fprintf(os.Stderr, "  stored   %s\n", store.Location())
+			restartSyncService(ctx)
+			fmt.Fprintf(os.Stderr, "\nNext: jiku doctor\n")
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&noBrowser, "no-browser", false, "do not try to open a browser")
 	return cmd
+}
+
+// restartSyncService restarts the docs sync service when it is enabled, so a daemon that
+// stopped with 77 for a refused session — or that holds the session this login replaced —
+// picks the new one up without a second command. It is best effort: no session bus, or no
+// such unit, and nothing is said.
+func restartSyncService(ctx context.Context) {
+	u, err := systemd.UserUnit(ctx, systemd.UnitName)
+	if err != nil || !u.Enabled() {
+		return
+	}
+	if err := systemd.RestartUserUnit(ctx, systemd.UnitName, u.ActiveState == "failed"); err != nil {
+		fmt.Fprintf(os.Stderr, "  sync     could not restart %s (%v); run\n"+
+			"           systemctl --user restart jiku-docs-sync\n", systemd.UnitName, err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "  sync     restarted %s with this session\n", systemd.UnitName)
 }
 
 // noRefreshTokenWarning is said at login, while the cause is still one step away, rather than
