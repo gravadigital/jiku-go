@@ -535,6 +535,9 @@ func newDocsLsCmd() *cobra.Command {
 			}
 			return withDocs(ctx, func(_ *jiku.Client, d *docs.Client) error {
 				f, err := d.ResolveFolder(ctx, ref)
+				if errors.Is(err, docs.ErrNotFound) && strings.Trim(ref, "/") == "" {
+					return lsTopmost(ctx, d)
+				}
 				if err != nil {
 					return err
 				}
@@ -559,6 +562,45 @@ func newDocsLsCmd() *cobra.Command {
 			})
 		},
 	}
+}
+
+// lsTopmost answers `ls /` for someone who may not read the root, which is everyone but the
+// admins: the folders they can read whose parent they cannot, so there is somewhere to start.
+func lsTopmost(ctx context.Context, d *docs.Client) error {
+	var all []docs.Folder
+	it := d.Iterate(ctx, "folders", jiku.List{Sort: []string{"path"}})
+	for it.Next() {
+		var f docs.Folder
+		if err := it.Item().Into(&f); err != nil {
+			return err
+		}
+		all = append(all, f)
+	}
+	if err := it.Err(); err != nil {
+		return err
+	}
+	top := topmostFolders(all)
+	entries := make([]lsEntry, 0, len(top))
+	for _, f := range top {
+		entries = append(entries, lsEntry{Type: "folder", ID: f.ID, Name: f.Name, Path: f.Path})
+	}
+	progressf("/: not readable by you; %d folder(s) you can read start below it\n", len(top))
+	return emit(os.Stdout, entries, nil)
+}
+
+// topmostFolders keeps the folders whose parent is not among them.
+func topmostFolders(all []docs.Folder) []docs.Folder {
+	have := make(map[string]bool, len(all))
+	for _, f := range all {
+		have[f.ID] = true
+	}
+	var top []docs.Folder
+	for _, f := range all {
+		if !have[f.ParentID] {
+			top = append(top, f)
+		}
+	}
+	return top
 }
 
 func newDocsSearchCmd() *cobra.Command {

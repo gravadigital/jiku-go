@@ -217,3 +217,22 @@ func TestPageSummaryOfAnUnpagedList(t *testing.T) {
 		t.Errorf("paged: %q", got)
 	}
 }
+
+// TestTopmostReadableFolders: a person who may not read the root still has somewhere to start.
+// `ls /` answered "not found" to them, while the hint pointed them back at `ls`.
+func TestTopmostReadableFolders(t *testing.T) {
+	got := topmostFolders([]docs.Folder{
+		{ID: "C", Path: "/clientes/", ParentID: "ROOT"},
+		{ID: "E", Path: "/clientes/exo/", ParentID: "C"},
+		{ID: "I", Path: "/infra/", ParentID: "ROOT"},
+		{ID: "P", Path: "/privado/sub/", ParentID: "HIDDEN"},
+		{ID: "S", Path: "/privado/sub/x/", ParentID: "P"},
+	})
+	var paths []string
+	for _, f := range got {
+		paths = append(paths, f.Path)
+	}
+	if strings.Join(paths, " ") != "/clientes/ /infra/ /privado/sub/" {
+		t.Fatalf("topmost: %v", paths)
+	}
+}

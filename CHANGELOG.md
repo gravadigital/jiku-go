@@ -134,6 +134,9 @@ All notable changes to this project are documented here. The format follows
   now skipped.
 - **`jiku docs query attachments.list` said "0 item(s), limit 0" above its items.** A list that
   answers without a page object now reports how many items it carries.
+- **`jiku docs ls /` answered "not found" to everyone but admins**, whom alone the root grants
+  read, while the hint said `jiku docs ls` shows what you can read. It now lists the topmost
+  folders the person can read.
 
 ### Changed
 

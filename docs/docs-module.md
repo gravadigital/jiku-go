@@ -57,6 +57,7 @@ exist or you may not see it.
 
 ```bash
 jiku docs ls /clientes/acme/                          # folders and documents in a folder
+jiku docs ls /                                        # the root; without read on it, the topmost folders you can read
 jiku docs search '"integración con aduana" -prueba'   # full text, best hits first
 jiku docs search staging --filter projectId=12
 jiku docs get /infra/servidores/staging.md > staging.md
