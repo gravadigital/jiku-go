@@ -23,6 +23,8 @@ type Config struct {
 	Root string
 	// Only limits the sync to these module path prefixes. Empty is everything readable.
 	Only []string
+	// Exclude removes these prefixes from what Only selects.
+	Exclude []string
 	// Identity is "{instance}/{userID}". A folder synced for one identity refuses another:
 	// what one person may read is not what another may.
 	Identity string
@@ -31,7 +33,9 @@ type Config struct {
 	// FullEvery is the interval between full reconciliations. Default 24h.
 	FullEvery time.Duration
 	// CatchUpEvery is the interval between reads of the change feed while online, a safety net
-	// under the notifications. Default 5m.
+	// under the notifications — and the only way an idle daemon notices that the module went
+	// down: the notifications are a subscription, which stays silent either way, and a person
+	// may not ping the module. Default 30s; a read with nothing new is one small reply.
 	CatchUpEvery time.Duration
 	// RetryEvery is how often an offline daemon checks whether the module is back. Default 30s.
 	RetryEvery time.Duration
@@ -42,7 +46,121 @@ type Config struct {
 	Log io.Writer
 	// Now is the clock. Default time.Now.
 	Now func() time.Time
+
+	// Journal writes each line with a syslog priority prefix ("<4>") and without the time,
+	// which journald records itself. Set it only when stderr is the journal.
+	Journal bool
+	// LogLevel drops lines below it from Log: debug, info (default), warn or error. The
+	// history `sync status` shows keeps every line.
+	LogLevel string
+	// Report receives the daemon's state whenever it may have changed: the STATUS line.
+	Report func(Snapshot)
+	// OnEvent receives what is worth telling the person outside the log.
+	OnEvent func(Event)
+	// Heartbeat is called from the engine's own loop — never from a goroutine of its own — at
+	// least every HeartbeatEvery while that loop is responsive. A hung loop stops calling it,
+	// which is the point: it feeds systemd's watchdog.
+	Heartbeat      func()
+	HeartbeatEvery time.Duration
+	// StopTimeout bounds uploading pending edits when ctx ends. Default 20s, under the
+	// unit's TimeoutStopSec=30.
+	StopTimeout time.Duration
 }
+
+// Phase is what the daemon is doing, for the STATUS line.
+type Phase int
+
+const (
+	PhaseOffline Phase = iota
+	PhaseUnavailable
+	PhaseNotInstalled
+	PhaseIncompatible
+	PhaseReconciling
+	PhaseUploading
+	PhaseSynced
+)
+
+// Snapshot is the daemon's state at one moment.
+type Snapshot struct {
+	Phase      Phase
+	Documents  int
+	Conflicts  int
+	Pending    int
+	LastChange time.Time
+}
+
+// Text is the STATUS line `systemctl --user status` shows. It is Spanish because it is read by
+// the people the daemon serves, like the notifications.
+func (s Snapshot) Text() string {
+	switch s.Phase {
+	case PhaseOffline:
+		return "Sin conexión, reintentando"
+	case PhaseUnavailable:
+		return "Módulo de documentación no disponible"
+	case PhaseNotInstalled:
+		return "Módulo de documentación no instalado"
+	case PhaseIncompatible:
+		return "Módulo de documentación incompatible con esta versión de jiku"
+	case PhaseReconciling:
+		return "Reconciliando…"
+	case PhaseUploading:
+		return plural(s.Pending, "Subiendo 1 cambio", "Subiendo %s cambios")
+	}
+	if s.Conflicts > 0 {
+		return plural(s.Conflicts, "1 conflicto pendiente", "%s conflictos pendientes")
+	}
+	t := "Sincronizado · " + plural(s.Documents, "1 documento", "%s documentos")
+	if !s.LastChange.IsZero() {
+		t += " · último cambio " + s.LastChange.Local().Format("15:04")
+	}
+	return t
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return fmt.Sprintf(many, Thousands(n))
+}
+
+// Thousands writes n with a dot every three digits, 1.240, as the person reading it writes it.
+func Thousands(n int) string {
+	s := fmt.Sprint(n)
+	if n < 0 {
+		return "-" + Thousands(-n)
+	}
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "." + s[i:]
+	}
+	return s
+}
+
+// EventKind is a kind of event worth a desktop notification.
+type EventKind int
+
+const (
+	// EventConflict: a remote version was written beside a file with local edits.
+	EventConflict EventKind = iota
+	// EventRejected: a local file was not uploaded, and will not be until the person acts.
+	EventRejected
+	// EventUnavailable: the module has been down for UnavailableAfter.
+	EventUnavailable
+	// EventUninstalled: the module's registry key is gone; nothing syncs until it is back.
+	EventUninstalled
+)
+
+// Event is one thing that happened, for OnEvent.
+type Event struct {
+	Kind EventKind
+	// Path is the module path concerned, "" for the module as a whole.
+	Path string
+	// Reason says why, for EventRejected.
+	Reason string
+}
+
+// UnavailableAfter is how long the module must be down before EventUnavailable: a restart of
+// the module is not worth interrupting anybody for.
+const UnavailableAfter = 5 * time.Minute
 
 // Engine mirrors the module into Root. It runs on one goroutine: the state, the disk and the
 // bus are only touched from Run's loop, so nothing here needs a lock.
@@ -62,7 +180,21 @@ type Engine struct {
 	warned map[string]bool
 	// lockedRetry are documents whose upload was refused by another session's lock.
 	lockedRetry map[string]bool
+
+	// lastBeat is when Heartbeat was last called.
+	lastBeat time.Time
+	// downSince is when the module stopped answering; zero while it answers.
+	downSince time.Time
+	// phase is the last phase reported.
+	phase Phase
+	// watching is set once the tree is under the watcher, so Run does not add it twice.
+	watching bool
+	// online is set while a session works, so going offline is said once, not every retry.
+	sessionUp bool
 }
+
+// ErrIdentity is a state made for another identity. Waiting does not fix it.
+var ErrIdentity = errors.New("docsync: the state belongs to another identity")
 
 // errOffline ends an online session because the module stopped answering.
 var errOffline = errors.New("docsync: the module is not answering")
@@ -79,7 +211,7 @@ func New(cfg Config, st *State, reg Registry, connect Connector, watcher Watcher
 		cfg.FullEvery = 24 * time.Hour
 	}
 	if cfg.CatchUpEvery <= 0 {
-		cfg.CatchUpEvery = 5 * time.Minute
+		cfg.CatchUpEvery = 30 * time.Second
 	}
 	if cfg.RetryEvery <= 0 {
 		cfg.RetryEvery = 30 * time.Second
@@ -90,21 +222,173 @@ func New(cfg Config, st *State, reg Registry, connect Connector, watcher Watcher
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
+	if cfg.LogLevel == "" {
+		cfg.LogLevel = "info"
+	}
+	if cfg.StopTimeout <= 0 {
+		cfg.StopTimeout = 20 * time.Second
+	}
 	return &Engine{cfg: cfg, state: st, reg: reg, connect: connect, watcher: watcher,
 		folders: map[string]RemoteFolder{}, permissions: map[string]string{},
 		warned: map[string]bool{}, lockedRetry: map[string]bool{}}
 }
 
+// SetRemote gives the engine its registry and connector, which need a bus connection: the
+// engine is built before connecting, so the folder is watched while the bus is out of reach.
+// identity is "{instance}/{userID}", known once connected.
+func (e *Engine) SetRemote(reg Registry, connect Connector, identity string) {
+	e.reg, e.connect, e.cfg.Identity = reg, connect, identity
+}
+
+// Beat feeds the heartbeat from a loop outside the engine's own — the command's connect loop —
+// that runs before Run.
+func (e *Engine) Beat() { e.beat() }
+
 // logf writes a line to the log and to the state's history.
+//
+// Lines carry paths, ids, versions and codes — never a document's content. An error's first
+// line is the most that is ever quoted, and the module's errors do not echo content.
 func (e *Engine) logf(level, p, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	ts := e.cfg.Now()
-	where := ""
-	if p != "" {
-		where = p + ": "
+	if levelRank(level) >= levelRank(e.cfg.LogLevel) {
+		where := ""
+		if p != "" {
+			where = p + ": "
+		}
+		fmt.Fprint(e.cfg.Log, FormatLine(e.cfg.Journal, ts, level, where+msg))
 	}
-	fmt.Fprintf(e.cfg.Log, "%s %-5s %s%s\n", ts.Format("15:04:05"), level, where, msg)
-	_ = e.state.Log(ts, level, p, msg)
+	if level != "debug" {
+		_ = e.state.Log(ts, level, p, msg)
+	}
+}
+
+// FormatLine formats one log line: under journald with the priority prefix it parses and no
+// time, since it records its own; elsewhere with the time.
+func FormatLine(journal bool, ts time.Time, level, msg string) string {
+	if journal {
+		return fmt.Sprintf("%s%s\n", priority(level), msg)
+	}
+	return fmt.Sprintf("%s %-5s %s\n", ts.Format("15:04:05"), level, msg)
+}
+
+// priority is the syslog priority prefix journald strips and records, so that
+// `journalctl -p warning` works.
+func priority(level string) string {
+	switch level {
+	case "error":
+		return "<3>"
+	case "warn":
+		return "<4>"
+	case "debug":
+		return "<7>"
+	}
+	return "<6>"
+}
+
+func levelRank(level string) int {
+	switch level {
+	case "debug":
+		return 0
+	case "warn":
+		return 2
+	case "error":
+		return 3
+	}
+	return 1
+}
+
+// beat calls Heartbeat if one is due. It is called from inside the long walks — a full
+// reconciliation of thousands of documents is the loop working, not hung — where it is limited
+// to one per HeartbeatEvery.
+func (e *Engine) beat() {
+	if e.cfg.Heartbeat == nil || time.Since(e.lastBeat) < e.cfg.HeartbeatEvery {
+		return
+	}
+	e.tick()
+}
+
+// tick calls Heartbeat unconditionally: the loops' ticker fires every HeartbeatEvery, and
+// rate-limiting it against the same period skips a tick whenever the previous one was read a
+// little late — doubling the gap, which with WatchdogSec=60 and a 30 s ticker is a kill.
+func (e *Engine) tick() {
+	if e.cfg.Heartbeat == nil {
+		return
+	}
+	e.lastBeat = time.Now()
+	e.cfg.Heartbeat()
+}
+
+// heartbeats is the ticker channel the loops select on, nil when there is no heartbeat.
+func (e *Engine) heartbeats() (<-chan time.Time, func()) {
+	if e.cfg.Heartbeat == nil || e.cfg.HeartbeatEvery <= 0 {
+		return nil, func() {}
+	}
+	t := time.NewTicker(e.cfg.HeartbeatEvery)
+	return t.C, t.Stop
+}
+
+// report sends the state for the STATUS line. pending is the number of edits waiting for their
+// debounce.
+func (e *Engine) report(phase Phase, pending int) {
+	e.phase = phase
+	if e.cfg.Report == nil {
+		return
+	}
+	snap := Snapshot{Phase: phase, Pending: pending}
+	if c, err := e.state.Counts(); err == nil {
+		snap.Documents, snap.Conflicts = c.Documents, c.Conflicts
+	}
+	if t, _, err := e.state.LastChange(); err == nil {
+		snap.LastChange = t
+	}
+	if phase == PhaseUploading && pending == 0 {
+		snap.Phase = PhaseSynced
+	}
+	e.cfg.Report(snap)
+}
+
+func (e *Engine) event(ev Event) {
+	if e.cfg.OnEvent != nil {
+		e.cfg.OnEvent(ev)
+	}
+}
+
+// moduleDown notes that the module is not answering, and raises EventUnavailable once per
+// outage after UnavailableAfter.
+func (e *Engine) moduleDown(phase Phase) {
+	now := e.cfg.Now()
+	if e.downSince.IsZero() {
+		e.downSince = now
+	}
+	e.report(phase, 0)
+	if now.Sub(e.downSince) >= UnavailableAfter && !e.warned["notified:down"] {
+		e.warned["notified:down"] = true
+		e.event(Event{Kind: EventUnavailable})
+	}
+}
+
+func (e *Engine) moduleUp() {
+	e.downSince = time.Time{}
+	delete(e.warned, "notified:down")
+}
+
+// uninstalled reports the module gone, and raises EventUninstalled once until it is back.
+func (e *Engine) uninstalled(phase Phase) {
+	e.report(phase, 0)
+	if !e.warned["notified:uninstalled"] {
+		e.warned["notified:uninstalled"] = true
+		e.event(Event{Kind: EventUninstalled})
+	}
+}
+
+// rejected logs a file that is not uploaded, once per key, and raises EventRejected with it.
+func (e *Engine) rejected(key, p, reason, format string, args ...any) {
+	if e.warned[key] {
+		return
+	}
+	e.warnOnce(key, p, format, args...)
+	e.event(Event{Kind: EventRejected, Path: p, Reason: reason})
 }
 
 func (e *Engine) warnOnce(key, p, format string, args ...any) {
@@ -125,22 +409,32 @@ func (e *Engine) CheckIdentity() error {
 		return e.state.SetMeta(MetaIdentity, e.cfg.Identity)
 	}
 	if e.cfg.Identity != "" && have != e.cfg.Identity {
-		return fmt.Errorf("%s is synced for %s, and this is %s. What one identity may read is not "+
-			"what another may, so one folder cannot serve both: sync into another folder", e.cfg.Root, have, e.cfg.Identity)
+		return fmt.Errorf("%w: %s is synced for %s, and this is %s. What one identity may read is not "+
+			"what another may, so one folder cannot serve both: sync into another folder", ErrIdentity,
+			e.cfg.Root, have, e.cfg.Identity)
 	}
 	return nil
 }
 
 func (e *Engine) inScope(p string) bool {
+	for _, prefix := range e.cfg.Exclude {
+		if hasPrefixFold(p, prefix) {
+			return false
+		}
+	}
 	if len(e.cfg.Only) == 0 {
 		return true
 	}
 	for _, prefix := range e.cfg.Only {
-		if strings.HasPrefix(strings.ToLower(p), strings.ToLower(prefix)) {
+		if hasPrefixFold(p, prefix) {
 			return true
 		}
 	}
 	return false
+}
+
+func hasPrefixFold(p, prefix string) bool {
+	return strings.HasPrefix(strings.ToLower(p), strings.ToLower(prefix))
 }
 
 func folderKey(p string) string {
@@ -185,16 +479,15 @@ func (e *Engine) Run(ctx context.Context) error {
 	if err := e.CheckIdentity(); err != nil {
 		return err
 	}
+	if err := e.WatchLocal(); err != nil {
+		return err
+	}
 	changes, err := e.reg.Watch(ctx)
 	if err != nil {
 		return err
 	}
-	if e.watcher != nil {
-		if err := e.watchTree(e.cfg.Root); err != nil {
-			return err
-		}
-	}
 	for ctx.Err() == nil {
+		e.beat()
 		st, err := e.reg.Status(ctx)
 		switch {
 		case errors.Is(err, modules.ErrPermissions), errors.Is(err, modules.ErrNoRegistry):
@@ -202,7 +495,9 @@ func (e *Engine) Run(ctx context.Context) error {
 			return err
 		case err != nil:
 			e.logf("error", "", "cannot read the module registry: %v", firstLine(err))
+			e.moduleDown(PhaseOffline)
 		case st.Status == modules.Available:
+			delete(e.warned, "notified:uninstalled")
 			err := e.online(ctx, *st.Record, changes)
 			switch {
 			case ctx.Err() != nil:
@@ -210,15 +505,27 @@ func (e *Engine) Run(ctx context.Context) error {
 			case errors.Is(err, errRecord):
 				continue
 			case errors.Is(err, errOffline):
-				e.logf("warn", "", "the module stopped answering; offline. Local edits are kept and "+
-					"sent when it is back")
+				if e.sessionUp {
+					e.logf("warn", "", "the module stopped answering; offline. Local edits are kept and "+
+						"sent when it is back")
+				} else {
+					e.warnOnce("offline", "", "the module is not answering; offline until it does. Local "+
+						"edits are kept and sent then")
+				}
+				e.sessionUp = false
+				e.moduleDown(PhaseUnavailable)
 			case err != nil:
 				return err
 			}
 		case st.Status == modules.Unavailable:
 			e.warnOnce("offline", "", "the module is installed and down; offline until it answers")
+			e.moduleDown(PhaseUnavailable)
+		case st.Status == modules.Incompatible:
+			e.warnOnce("absent:"+string(st.Status), "", "not syncing: %s. Every file stays where it is", st.Reason)
+			e.report(PhaseIncompatible, 0)
 		default:
 			e.warnOnce("absent:"+string(st.Status), "", "not syncing: %s. Every file stays where it is", st.Reason)
+			e.uninstalled(PhaseNotInstalled)
 		}
 		if !e.wait(ctx, changes) {
 			return nil
@@ -227,11 +534,26 @@ func (e *Engine) Run(ctx context.Context) error {
 	return nil
 }
 
+// WatchLocal puts the folder under the watcher. Run does it too; calling it first means edits
+// made while the daemon is still connecting are not missed.
+func (e *Engine) WatchLocal() error {
+	if e.watcher == nil || e.watching {
+		return nil
+	}
+	if err := e.watchTree(e.cfg.Root); err != nil {
+		return err
+	}
+	e.watching = true
+	return nil
+}
+
 // wait idles until it is worth checking the module again: the retry interval, or a change of
 // its registry key. Local edits keep piling up on disk meanwhile and are found by the next scan.
 func (e *Engine) wait(ctx context.Context, changes <-chan modules.Change) bool {
 	t := time.NewTimer(e.cfg.RetryEvery)
 	defer t.Stop()
+	hb, stop := e.heartbeats()
+	defer stop()
 	var events <-chan string
 	if e.watcher != nil {
 		events = e.watcher.Events()
@@ -240,6 +562,8 @@ func (e *Engine) wait(ctx context.Context, changes <-chan modules.Change) bool {
 		select {
 		case <-ctx.Done():
 			return false
+		case <-hb:
+			e.tick()
 		case <-t.C:
 			return true
 		case c, ok := <-changes:
@@ -247,11 +571,11 @@ func (e *Engine) wait(ctx context.Context, changes <-chan modules.Change) bool {
 				return false
 			}
 			if c.Record != nil {
-				delete(e.warned, "offline")
 				return true
 			}
 			e.warnOnce("removed", "", "the module was uninstalled (its registry key is gone): not "+
 				"syncing. Every file stays where it is")
+			e.uninstalled(PhaseNotInstalled)
 		case _, ok := <-events:
 			// Drained so the watcher never blocks; the scan when the module is back
 			// finds the change by checksum.
@@ -267,9 +591,13 @@ func (e *Engine) online(ctx context.Context, rec modules.Record, changes <-chan 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	r := e.connect(rec)
-	delete(e.warned, "offline")
 	delete(e.warned, "removed")
-	e.logf("info", "", "online (%s)", rec.ServiceName)
+	// While the module is down a session is attempted every RetryEvery, and its registry
+	// key says "available" all along when the person may not ping it. Nothing is said, and
+	// the STATUS line keeps saying "down", until a session has actually worked.
+	if e.downSince.IsZero() {
+		e.report(PhaseReconciling, 0)
+	}
 	_ = e.state.SetMeta(MetaServiceName, rec.ServiceName)
 
 	// Subscribe FIRST, then catch up: a change between the two is then seen twice, which is
@@ -296,6 +624,11 @@ func (e *Engine) online(ctx context.Context, rec modules.Record, changes <-chan 
 	if err != nil {
 		return e.sessionErr(err)
 	}
+	delete(e.warned, "offline")
+	e.moduleUp()
+	e.sessionUp = true
+	e.logf("info", "", "online (%s)", rec.ServiceName)
+	e.report(PhaseSynced, 0)
 
 	due := make(chan string, 64)
 	timers := map[string]*time.Timer{}
@@ -312,12 +645,18 @@ func (e *Engine) online(ctx context.Context, rec modules.Record, changes <-chan 
 	defer catchUp.Stop()
 	fullCheck := time.NewTicker(minDuration(time.Hour, e.cfg.FullEvery))
 	defer fullCheck.Stop()
+	hb, stopBeats := e.heartbeats()
+	defer stopBeats()
 
 	for {
 		var err error
 		select {
 		case <-ctx.Done():
+			e.flush(r, timers, due, events)
 			return nil
+		case <-hb:
+			e.tick()
+			continue
 		case n, ok := <-notes:
 			if !ok {
 				return errOffline
@@ -330,6 +669,7 @@ func (e *Engine) online(ctx context.Context, rec modules.Record, changes <-chan 
 			if c.Record == nil {
 				e.logf("warn", "", "the module was uninstalled (its registry key is gone): not syncing. "+
 					"Every file stays where it is")
+				e.uninstalled(PhaseNotInstalled)
 				return errRecord
 			}
 			if c.Record.ServiceName != rec.ServiceName || c.Record.Protocol != rec.Protocol {
@@ -354,12 +694,57 @@ func (e *Engine) online(ctx context.Context, rec modules.Record, changes <-chan 
 			err = e.catchUp(ctx, r)
 		case <-fullCheck.C:
 			if last, _ := e.state.LastFull(); e.cfg.Now().Sub(last) >= e.cfg.FullEvery {
+				e.report(PhaseReconciling, 0)
 				err = e.fullReconcile(ctx, r)
 			}
 		}
 		if err != nil {
 			if err := e.sessionErr(err); err != nil {
 				return err
+			}
+		}
+		e.beat()
+		e.report(PhaseUploading, len(timers))
+	}
+}
+
+// flush uploads the edits still waiting for their debounce, when the daemon is told to stop:
+// `systemctl stop` gives TimeoutStopSec for this. The session's context is already cancelled,
+// so the uploads get one of their own, bounded by StopTimeout.
+func (e *Engine) flush(r Remote, timers map[string]*time.Timer, due chan string, events <-chan string) {
+	paths := map[string]bool{}
+	for p, t := range timers {
+		t.Stop()
+		paths[p] = true
+	}
+	for drained := false; !drained; {
+		select {
+		case p := <-due:
+			paths[p] = true
+		case p, ok := <-events:
+			if !ok {
+				events = nil
+				continue
+			}
+			if info, err := os.Stat(p); err == nil && !info.IsDir() {
+				paths[p] = true
+			}
+		default:
+			drained = true
+		}
+	}
+	if len(paths) == 0 {
+		return
+	}
+	e.logf("info", "", "stopping: uploading %d pending change(s) first", len(paths))
+	e.report(PhaseUploading, len(paths))
+	ctx, cancel := context.WithTimeout(context.Background(), e.cfg.StopTimeout)
+	defer cancel()
+	for p := range paths {
+		if err := e.localChanged(ctx, r, p); err != nil {
+			e.logf("error", "", "stopping: %v. The edit stays on disk and is sent at the next start", firstLine(err))
+			if unreachable(err) || ctx.Err() != nil {
+				return
 			}
 		}
 	}
@@ -441,6 +826,7 @@ func (e *Engine) fullReconcile(ctx context.Context, r Remote) error {
 	}
 
 	for _, d := range remote {
+		e.beat()
 		if err := e.reconcileDoc(ctx, r, d); err != nil {
 			if unreachable(err) {
 				return err
@@ -591,6 +977,7 @@ func (e *Engine) fetch(ctx context.Context, r Remote, id string, rec *DocRecord)
 		next.Conflict, _ = remotePath(e.cfg.Root, cp)
 		e.logf("warn", d.Path, "CONFLICT: changed both here and in Jiku. Version %d is in %s; merge "+
 			"it into the file and delete the copy, and your merge is uploaded", d.Version, filepath.Base(cp))
+		e.event(Event{Kind: EventConflict, Path: d.Path})
 	default:
 		if err := writeAtomic(local, content, ro); err != nil {
 			return err
@@ -600,6 +987,7 @@ func (e *Engine) fetch(ctx context.Context, r Remote, id string, rec *DocRecord)
 		} else {
 			e.logf("info", d.Path, "updated to version %d", d.Version)
 		}
+		_ = e.state.SetLastChange(e.cfg.Now(), false)
 	}
 	if next.Conflict == "" {
 		if err := setReadOnly(local, ro); err != nil {
@@ -639,7 +1027,7 @@ func (e *Engine) moveLocal(rec *DocRecord, to string) error {
 func (e *Engine) noLongerReadable(rec DocRecord, why string) {
 	if local, err := localPath(e.cfg.Root, rec.Path); err == nil {
 		if _, err := os.Stat(local); err == nil {
-			dest, err := moveAside(local, filepath.Join(e.cfg.Root, StateDir, NoAccessDir), rec.Path)
+			dest, err := moveAside(local, filepath.Join(e.cfg.Root, NoAccessDir), rec.Path)
 			if err != nil {
 				e.logf("error", rec.Path, "%s, and moving it aside failed: %v", why, err)
 				return
@@ -710,6 +1098,7 @@ func (e *Engine) catchUp(ctx context.Context, r Remote) error {
 			return err
 		}
 		for _, c := range page.Items {
+			e.beat()
 			if err := e.applyChange(ctx, r, c); err != nil {
 				if unreachable(err) {
 					return err
@@ -827,6 +1216,7 @@ func (e *Engine) scanLocal(ctx context.Context, r Remote) error {
 			}
 			return nil
 		}
+		e.beat()
 		if err := e.localChanged(ctx, r, p); err != nil && unreachable(err) {
 			return err
 		}
@@ -841,7 +1231,7 @@ func (e *Engine) localChanged(ctx context.Context, r Remote, local string) error
 		return nil
 	}
 	if !strings.EqualFold(path.Ext(p), ".md") {
-		e.warnOnce("ext:"+p, p, "not synced: only .md files are documents")
+		e.rejected("ext:"+p, p, "solo los archivos .md son documentos", "not synced: only .md files are documents")
 		return nil
 	}
 	rec, err := e.state.DocByPath(p)
@@ -880,7 +1270,8 @@ func (e *Engine) localChanged(ctx context.Context, r Remote, local string) error
 		return nil
 	}
 	if rec.ReadOnly {
-		e.warnOnce("ro:"+rec.ID+sum, p, "changed here, but the folder is read-only for you: not uploaded")
+		e.rejected("ro:"+rec.ID+sum, p, "no tenés permiso de escritura en esa carpeta",
+			"changed here, but the folder is read-only for you: not uploaded")
 		return nil
 	}
 	v, err := r.Update(ctx, rec.ID, rec.Version, content)
@@ -888,6 +1279,7 @@ func (e *Engine) localChanged(ctx context.Context, r Remote, local string) error
 	case err == nil:
 		rec.Version, rec.Checksum = v, sum
 		e.logf("info", p, "uploaded (version %d)", v)
+		_ = e.state.SetLastChange(e.cfg.Now(), true)
 		return e.state.PutDoc(*rec)
 	case jiku.IsCode(err, docs.CodeVersionConflict):
 		e.logf("warn", p, "somebody saved in Jiku first")
@@ -904,7 +1296,27 @@ func (e *Engine) localChanged(ctx context.Context, r Remote, local string) error
 		e.noLongerReadable(*rec, "no longer readable")
 		return nil
 	}
+	if reason, ok := refusal(err); ok {
+		e.rejected("refused:"+rec.ID+sum, p, reason, "not uploaded: %v", firstLine(err))
+		return nil
+	}
 	return err
+}
+
+// refusal recognises the module refusing a file for something only the person can fix, and
+// says what in the notification's words.
+func refusal(err error) (string, bool) {
+	switch {
+	case jiku.IsCode(err, docs.CodeFrontmatterInvalid):
+		return "el frontmatter no es válido", true
+	case jiku.IsCode(err, docs.CodePermissionDenied):
+		return "no tenés permiso de escritura", true
+	case jiku.IsCode(err, docs.CodeContentTooLarge):
+		return "el archivo es demasiado grande", true
+	case jiku.IsCode(err, docs.CodeFileNameInvalid):
+		return "Jiku no acepta ese nombre de archivo", true
+	}
+	return "", false
 }
 
 // createLocal creates a document for a new local file.
@@ -923,12 +1335,13 @@ func (e *Engine) createLocal(ctx context.Context, r Remote, p string, content []
 		folder, ok = e.folders[folderKey(dir)]
 	}
 	if !ok {
-		e.warnOnce("nofolder:"+p, p, "not uploaded: the folder %s does not exist in Jiku (or you cannot "+
-			"read it). Folders are created in Jiku, not by the sync", dir)
+		e.rejected("nofolder:"+p, p, "la carpeta no existe en Jiku", "not uploaded: the folder %s does not "+
+			"exist in Jiku (or you cannot read it). Folders are created in Jiku, not by the sync", dir)
 		return nil
 	}
 	if folder.Permission == "read" || folder.Permission == "" {
-		e.warnOnce("rofolder:"+p, p, "not uploaded: you cannot write in %s", dir)
+		e.rejected("rofolder:"+p, p, "no tenés permiso de escritura en esa carpeta",
+			"not uploaded: you cannot write in %s", dir)
 		return nil
 	}
 	id, err := e.state.PendingID(p, docs.NewID)
@@ -943,14 +1356,17 @@ func (e *Engine) createLocal(ctx context.Context, r Remote, p string, content []
 		}
 		_ = e.state.ClearPending(p)
 		e.logf("info", d.Path, "created in Jiku (version %d)", d.Version)
+		_ = e.state.SetLastChange(e.cfg.Now(), true)
 		return e.state.PutDoc(DocRecord{ID: d.ID, Path: d.Path, FolderID: folder.ID, Version: d.Version, Checksum: sum})
 	case jiku.IsCode(err, docs.CodeAlreadyExists):
 		_ = e.state.ClearPending(p)
 		e.warnOnce("exists:"+p, p, "not created: a document with that name already exists in Jiku; "+
 			"the next reconciliation treats this file as a conflict with it")
 		return nil
-	case jiku.IsCode(err, docs.CodeFileNameInvalid):
-		e.warnOnce("name:"+p, p, "not created: Jiku refuses the file name")
+	}
+	if reason, ok := refusal(err); ok {
+		_ = e.state.ClearPending(p)
+		e.rejected("refused:"+p+sum, p, reason, "not created: %v", firstLine(err))
 		return nil
 	}
 	return err

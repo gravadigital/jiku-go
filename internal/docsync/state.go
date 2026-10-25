@@ -2,8 +2,8 @@
 // read into a local folder and sends local edits back.
 //
 // It is internal on purpose. What is promised is the command, its flags and the on-disk layout
-// (`.jiku-docs/state.db`, `.jiku-docs/sin-acceso/`, `<name>.remoto-v<n>.md`); the Go API is
-// free to change.
+// (`$XDG_STATE_HOME/jiku-docs/<instance>/state.db`, `<folder>/.sin-acceso/`,
+// `<name>.remoto-v<n>.md`); the Go API is free to change.
 package docsync
 
 import (
@@ -13,20 +13,13 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	// A pure-Go SQLite: the release binaries are built with CGO_ENABLED=0 for five platforms,
 	// and a cgo driver would end that.
 	_ "modernc.org/sqlite"
 )
-
-// StateDir is the daemon's own folder inside the synced one. Everything under it is ignored by
-// the sync itself.
-const StateDir = ".jiku-docs"
-
-// NoAccessDir is where files go when their document is no longer readable. They are moved, never
-// deleted: the person may still need what they had.
-const NoAccessDir = "sin-acceso"
 
 // State is the daemon's memory: which document each file is, at which version, and how far the
 // change feed has been read.
@@ -109,7 +102,44 @@ const (
 	MetaLastSeq     = "lastSeq"
 	MetaLastFull    = "lastFull"
 	MetaServiceName = "serviceName"
+	// MetaRoot is the folder the state describes. See OpenBound.
+	MetaRoot = "root"
+	// MetaLastChange is the last change applied either way, "<RFC3339>|up" or "<RFC3339>|down".
+	MetaLastChange = "lastChange"
 )
+
+// Counts is what the daemon's STATUS line needs, read in one query.
+type Counts struct {
+	Documents int
+	Conflicts int
+}
+
+// Counts counts the documents tracked and those waiting for a merge.
+func (s *State) Counts() (Counts, error) {
+	var c Counts
+	err := s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(conflict <> ''), 0) FROM docs`).Scan(&c.Documents, &c.Conflicts)
+	return c, err
+}
+
+// LastChange is the last change applied and whether it was an upload; zero if none.
+func (s *State) LastChange() (time.Time, bool, error) {
+	v, err := s.Meta(MetaLastChange)
+	if err != nil || v == "" {
+		return time.Time{}, false, err
+	}
+	ts, dir, _ := strings.Cut(v, "|")
+	t, err := time.Parse(time.RFC3339Nano, ts)
+	return t, dir == "up", err
+}
+
+// SetLastChange records a change applied, up (uploaded) or down (downloaded).
+func (s *State) SetLastChange(t time.Time, up bool) error {
+	dir := "down"
+	if up {
+		dir = "up"
+	}
+	return s.SetMeta(MetaLastChange, t.UTC().Format(time.RFC3339Nano)+"|"+dir)
+}
 
 // Meta reads a value; "" when absent.
 func (s *State) Meta(key string) (string, error) {

@@ -9,6 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
+
+	"github.com/gravadigital/jiku-go/internal/systemd"
 )
 
 func main() {
@@ -19,7 +22,15 @@ func main() {
 		// Cobra has already printed usage errors; anything else is ours to report.
 		var silent silentError
 		if !errors.As(err, &silent) {
-			fmt.Fprintln(os.Stderr, "\nerror: "+err.Error())
+			if systemd.UnderJournal() {
+				// journald stores each line as an entry of its own, so each one carries the
+				// priority; otherwise only the first would show under `journalctl -p err`.
+				for _, line := range strings.Split("error: "+err.Error(), "\n") {
+					fmt.Fprintln(os.Stderr, "<3>"+line)
+				}
+			} else {
+				fmt.Fprintln(os.Stderr, "\nerror: "+err.Error())
+			}
 		}
 		code := 1
 		var coded exitError

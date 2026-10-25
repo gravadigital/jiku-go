@@ -219,6 +219,7 @@ func (l *lockedLog) String() string {
 type harness struct {
 	t      *testing.T
 	root   string
+	stDir  string
 	remote *fakeRemote
 	state  *State
 	e      *Engine
@@ -227,8 +228,8 @@ type harness struct {
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	root := t.TempDir()
-	st, err := OpenState(StatePath(root))
+	root, stDir := t.TempDir(), t.TempDir()
+	st, _, err := OpenBound(stDir, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +240,7 @@ func newHarness(t *testing.T) *harness {
 	log := &lockedLog{}
 	e := New(Config{Root: root, Identity: identit, Log: log}, st, available(),
 		func(modules.Record) Remote { return r }, nil)
-	return &harness{t: t, root: root, remote: r, state: st, e: e, log: log}
+	return &harness{t: t, root: root, stDir: stDir, remote: r, state: st, e: e, log: log}
 }
 
 func (h *harness) file(p string) string {
@@ -426,7 +427,7 @@ func TestIgnoredFilesAreNotSent(t *testing.T) {
 	h := newHarness(t)
 	h.once()
 	for _, p := range []string{"/infra/foto.png", "/infra/.oculto.md", "/infra/a.md~", "/infra/.a.md.swp",
-		"/infra/#a.md#", "/infra/a.remoto-v7.md", "/.jiku-docs/x.md", "/.git/x.md"} {
+		"/infra/#a.md#", "/infra/a.remoto-v7.md", "/.jiku-docs/x.md", "/.sin-acceso/x.md", "/.git/x.md"} {
 		local := h.write(p, "x")
 		if err := h.e.localChanged(context.Background(), h.remote, local); err != nil {
 			t.Fatal(err)
@@ -452,7 +453,7 @@ func TestNoLongerReadableIsMovedAsideNotDeleted(t *testing.T) {
 	if h.exists("/solo/r.md") {
 		t.Fatal("still in place")
 	}
-	if b, err := os.ReadFile(filepath.Join(h.root, StateDir, NoAccessDir, "solo", "r.md")); err != nil || string(b) != "# R\n" {
+	if b, err := os.ReadFile(filepath.Join(h.root, NoAccessDir, "solo", "r.md")); err != nil || string(b) != "# R\n" {
 		t.Fatalf("not moved aside: %v", err)
 	}
 	if h.rec(docRO) != nil {
@@ -480,7 +481,7 @@ func TestRemoteDeletion(t *testing.T) {
 	if h.exists("/infra/b.md") || h.exists("/infra/a.md") {
 		t.Fatal("deleted documents still in place")
 	}
-	if _, err := os.Stat(filepath.Join(h.root, StateDir, NoAccessDir, "infra", "a.md")); err != nil {
+	if _, err := os.Stat(filepath.Join(h.root, NoAccessDir, "infra", "a.md")); err != nil {
 		t.Fatal("a locally changed deleted document was not kept aside")
 	}
 }
@@ -635,7 +636,7 @@ func TestStatusReport(t *testing.T) {
 	h.write("/infra/a.md", "# A edited, not uploaded\n")
 	h.write("/infra/nuevo.md", "# nuevo\n")
 	h.write("/infra/foto.png", "x")
-	rep, err := Status(h.root, 5)
+	rep, err := Status(h.stDir, "", 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -644,8 +645,14 @@ func TestStatusReport(t *testing.T) {
 		rep.LastFull == nil || rep.Identity != identit || len(rep.Recent) == 0 {
 		t.Fatalf("%+v", rep)
 	}
-	if _, err := Status(t.TempDir(), 5); err == nil {
-		t.Fatal("an unsynced folder reported a status")
+	if rep.Root != h.root {
+		t.Errorf("root %q", rep.Root)
+	}
+	if _, err := Status(t.TempDir(), "", 5); err == nil {
+		t.Fatal("an instance with no state reported a status")
+	}
+	if _, err := Status(h.stDir, t.TempDir(), 5); err == nil {
+		t.Fatal("the state of one folder reported a status for another")
 	}
 }
 
@@ -659,4 +666,231 @@ func waitFor(t *testing.T, cond func() bool, what string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+// syncRecorder collects what the engine reports, from its goroutine.
+type syncRecorder struct {
+	mu     sync.Mutex
+	snaps  []Snapshot
+	events []Event
+	beats  int
+	at     []time.Time
+}
+
+func (r *syncRecorder) report(s Snapshot) { r.mu.Lock(); r.snaps = append(r.snaps, s); r.mu.Unlock() }
+func (r *syncRecorder) event(e Event)     { r.mu.Lock(); r.events = append(r.events, e); r.mu.Unlock() }
+func (r *syncRecorder) beat() {
+	r.mu.Lock()
+	r.beats++
+	r.at = append(r.at, time.Now())
+	r.mu.Unlock()
+}
+
+// TestHeartbeatsNeverSkipATick: with WatchdogSec=60 the heartbeat comes every 30 s, and a skipped
+// tick is a 60 s gap — a watchdog kill of a daemon that was only idle. It happened, on a daemon
+// waiting for the module to come back.
+func TestHeartbeatsNeverSkipATick(t *testing.T) {
+	h := newHarness(t)
+	reg := available()
+	reg.state = modules.State{Module: "docs", Status: modules.Unavailable}
+	rec := &syncRecorder{}
+	const every = 40 * time.Millisecond
+	h.e = New(Config{Root: h.root, Identity: identit, Log: h.log, RetryEvery: time.Hour,
+		Heartbeat: rec.beat, HeartbeatEvery: every}, h.state, reg, nil, &fakeWatcher{ch: make(chan string)})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- h.e.Run(ctx) }()
+	time.Sleep(30 * every)
+	cancel()
+	<-done
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	for i := 1; i < len(rec.at); i++ {
+		if gap := rec.at[i].Sub(rec.at[i-1]); gap > every*3/2 {
+			t.Fatalf("a %s gap between heartbeats %d and %d, ticker every %s", gap, i-1, i, every)
+		}
+	}
+	if len(rec.at) < 20 {
+		t.Fatalf("only %d heartbeats", len(rec.at))
+	}
+}
+
+func (r *syncRecorder) texts() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []string
+	for _, s := range r.snaps {
+		if len(out) == 0 || out[len(out)-1] != s.Text() {
+			out = append(out, s.Text())
+		}
+	}
+	return out
+}
+
+func (r *syncRecorder) has(kind EventKind) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, e := range r.events {
+		if e.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
+// TestRunReportsHeartbeatsAndStatus: the heartbeat comes from Run's loop while it is idle, and
+// the STATUS line goes through reconciliation to synced, and to "not installed" when the
+// registry key goes — with one critical event for it, and the process still running.
+func TestRunReportsHeartbeatsAndStatus(t *testing.T) {
+	h := newHarness(t)
+	reg := available()
+	w := &fakeWatcher{ch: make(chan string, 4)}
+	rec := &syncRecorder{}
+	h.e = New(Config{Root: h.root, Identity: identit, Log: h.log, RetryEvery: time.Hour,
+		Report: rec.report, OnEvent: rec.event, Heartbeat: rec.beat, HeartbeatEvery: 5 * time.Millisecond},
+		h.state, reg, func(modules.Record) Remote { return h.remote }, w)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- h.e.Run(ctx) }()
+	waitFor(t, func() bool {
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		return rec.beats >= 5
+	}, "heartbeats from the idle loop")
+
+	reg.changes <- modules.Change{Module: "docs"}
+	waitFor(t, func() bool { return rec.has(EventUninstalled) }, "the uninstall event")
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(rec.texts(), " | ")
+	if !strings.HasPrefix(got, "Reconciliando… | Sincronizado · 2 documentos · último cambio ") ||
+		!strings.Contains(got, "Módulo de documentación no instalado") {
+		t.Fatalf("STATUS went %s", got)
+	}
+}
+
+// TestStopUploadsWhatIsPending is case 6: an edit still inside its debounce when the daemon is
+// told to stop is uploaded before Run returns.
+func TestStopUploadsWhatIsPending(t *testing.T) {
+	h := newHarness(t)
+	w := &fakeWatcher{ch: make(chan string, 4)}
+	h.e = New(Config{Root: h.root, Identity: identit, Log: h.log, Debounce: time.Hour, RetryEvery: time.Hour},
+		h.state, available(), func(modules.Record) Remote { return h.remote }, w)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- h.e.Run(ctx) }()
+	waitFor(t, func() bool { return h.exists("/infra/a.md") }, "the first sync")
+	w.ch <- h.write("/infra/a.md", "# A typed just before stopping\n")
+	time.Sleep(50 * time.Millisecond) // the event is read and its hour-long debounce armed
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	h.remote.mu.Lock()
+	defer h.remote.mu.Unlock()
+	if string(h.remote.docs[docA].content) != "# A typed just before stopping\n" {
+		t.Fatalf("the pending edit was not uploaded at stop:\n%s", h.log)
+	}
+}
+
+func TestConflictRaisesAnEvent(t *testing.T) {
+	h := newHarness(t)
+	rec := &syncRecorder{}
+	h.e.cfg.OnEvent = rec.event
+	h.once()
+	h.write("/infra/a.md", "# A local\n")
+	h.remote.put(docA, "/infra/a.md", fInfra, "# A remote\n", 2)
+	if err := h.e.remoteChanged(context.Background(), h.remote, docA, "/infra/a.md", 2); err != nil {
+		t.Fatal(err)
+	}
+	if !rec.has(EventConflict) || rec.events[0].Path != "/infra/a.md" {
+		t.Fatalf("%+v", rec.events)
+	}
+}
+
+func TestExcludeTakesPrefixesOut(t *testing.T) {
+	h := newHarness(t)
+	h.e.cfg.Exclude = []string{"/SOLO/"}
+	h.once()
+	if !h.exists("/infra/a.md") || h.exists("/solo/r.md") {
+		t.Fatal("exclude ignored")
+	}
+}
+
+func TestJournalLinesCarryThePriority(t *testing.T) {
+	h := newHarness(t)
+	h.e.cfg.Journal = true
+	h.e.cfg.LogLevel = "warn"
+	h.e.logf("info", "", "hidden at warn")
+	h.e.logf("warn", "/a.md", "visible")
+	if got := h.log.String(); got != "<4>/a.md: visible\n" {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestSnapshotTexts(t *testing.T) {
+	at := time.Date(2026, 10, 25, 14, 32, 0, 0, time.Local)
+	for _, c := range []struct {
+		s    Snapshot
+		want string
+	}{
+		{Snapshot{Phase: PhaseSynced, Documents: 1240, LastChange: at}, "Sincronizado · 1.240 documentos · último cambio 14:32"},
+		{Snapshot{Phase: PhaseSynced, Documents: 1240, Conflicts: 2}, "2 conflictos pendientes"},
+		{Snapshot{Phase: PhaseUploading, Pending: 3}, "Subiendo 3 cambios"},
+		{Snapshot{Phase: PhaseOffline}, "Sin conexión, reintentando"},
+		{Snapshot{Phase: PhaseUnavailable}, "Módulo de documentación no disponible"},
+		{Snapshot{Phase: PhaseNotInstalled}, "Módulo de documentación no instalado"},
+		{Snapshot{Phase: PhaseReconciling}, "Reconciliando…"},
+	} {
+		if got := c.s.Text(); got != c.want {
+			t.Errorf("%q, want %q", got, c.want)
+		}
+	}
+	if Thousands(1234567) != "1.234.567" || Thousands(999) != "999" {
+		t.Error(Thousands(1234567))
+	}
+}
+
+// downRemote is a module whose registry key says available but that answers nothing.
+type downRemote struct{ *fakeRemote }
+
+func (downRemote) Notifications(context.Context) (<-chan docs.Notification, error) {
+	return nil, jiku.ErrNoEndpoint
+}
+
+// TestALongOutageIsSaidOnce: retrying every RetryEvery must neither reset the five-minute clock
+// (the notification never came) nor log a "stopped answering" warning per retry (it did, every
+// 30 s), nor flash "Reconciliando…" over "no disponible".
+func TestALongOutageIsSaidOnce(t *testing.T) {
+	h := newHarness(t)
+	rec := &syncRecorder{}
+	var mu sync.Mutex
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		now = now.Add(20 * time.Second)
+		return now
+	}
+	h.e = New(Config{Root: h.root, Identity: identit, Log: h.log, RetryEvery: time.Millisecond, Now: clock,
+		Report: rec.report, OnEvent: rec.event}, h.state, available(),
+		func(modules.Record) Remote { return downRemote{h.remote} }, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- h.e.Run(ctx) }()
+	waitFor(t, func() bool { return rec.has(EventUnavailable) }, "the outage notification")
+	cancel()
+	<-done
+	if n := strings.Count(h.log.String(), "stopped answering"); n != 0 {
+		t.Errorf("said %d times that a module that never answered stopped answering", n)
+	}
+	// The very first attempt may say it is reconciling: nothing is known to be down yet.
+	for i, text := range rec.texts() {
+		if text != "Módulo de documentación no disponible" && !(i == 0 && text == "Reconciliando…") {
+			t.Errorf("STATUS went %q during the outage", text)
+		}
+	}
 }
