@@ -125,6 +125,8 @@ All notable changes to this project are documented here. The format follows
   person templates do not grant the module's ping, and the refused ping was only recognised once
   the whole ping timeout had passed. The refusal is now noticed as soon as the server reports
   it, within a round trip; a refusal left on the connection by an earlier ping does not count.
+- **`jiku doctor` printed "available — jiku-docs, ping 0s" for an identity that may not ping.**
+  No ping was sent; the line now says the module is available but unverified.
 
 ### Changed
 

@@ -383,6 +383,10 @@ func moduleLine(st modules.State, err error) string {
 	}
 	switch st.Status {
 	case modules.Available:
+		if st.Unverified {
+			return fmt.Sprintf("available (unverified) — %s; this identity may not ping it, so whether "+
+				"it answers is known on the first request", st.Record.ServiceName)
+		}
 		return fmt.Sprintf("available — %s, ping %s", st.Record.ServiceName, st.Ping.Round(10*time.Microsecond))
 	case modules.Unavailable:
 		return fmt.Sprintf("unavailable — registered as %s and not answering its ping: installed and down",

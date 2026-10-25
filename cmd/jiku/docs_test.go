@@ -181,6 +181,9 @@ func TestDoctorModuleLine(t *testing.T) {
 		{modules.State{Status: modules.Available, Record: rec, Ping: 1200 * time.Microsecond}, nil, "available — jiku-docs, ping 1.2ms"},
 		{modules.State{Status: modules.Unavailable, Record: rec}, nil, "installed and down"},
 		{modules.State{Status: modules.NotInstalled}, nil, "not installed"},
+		// No ping was sent, so there is no round trip to print: "ping 0s" read as a live module.
+		{modules.State{Status: modules.Available, Record: rec, Unverified: true}, nil,
+			"available (unverified) — jiku-docs; this identity may not ping it"},
 		{modules.State{Status: modules.Incompatible, Reason: "v2"}, nil, "incompatible — v2"},
 		// A refusal says nothing about the module and must not read as "not installed".
 		{modules.State{}, fmt.Errorf("%w: x", modules.ErrPermissions), "unknown — the bus refused"},
