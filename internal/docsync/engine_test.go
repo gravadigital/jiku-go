@@ -470,7 +470,7 @@ func TestRemoteDeletion(t *testing.T) {
 	// Unchanged here: removed. Changed here: kept aside.
 	h.write("/infra/a.md", "# A local\n")
 	for _, id := range []string{docA, docB} {
-		if err := h.e.remoteDeleted(id); err != nil {
+		if err := h.e.remoteDeleted(id, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -479,6 +479,37 @@ func TestRemoteDeletion(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(h.root, StateDir, NoAccessDir, "infra", "a.md")); err != nil {
 		t.Fatal("a locally changed deleted document was not kept aside")
+	}
+}
+
+// TestAReplayedDeletionOfARestoredDocumentIsIgnored: the feed keeps a document's whole past, so
+// reading it from the start — the first sync, or after invalid_cursor — replays a deletion that a
+// later restore undid. Applying it removed the file, or moved a locally edited one aside.
+func TestAReplayedDeletionOfARestoredDocumentIsIgnored(t *testing.T) {
+	h := newHarness(t)
+	h.remote.put(docB, "/infra/b.md", fInfra, "# B\n", 1)
+	h.remote.mu.Lock()
+	h.remote.changes = append(h.remote.changes,
+		docs.Change{Seq: int64(len(h.remote.changes) + 1), Type: docs.TypeDocumentDeleted, DocumentID: docB, Version: 1, Path: "/infra/b.md"})
+	h.remote.mu.Unlock()
+	h.remote.put(docB, "/infra/b.md", fInfra, "# B\n", 2) // restored: same content, version 2
+
+	h.once()
+	if strings.Contains(h.log.String(), "deleted in Jiku") || h.file("/infra/b.md") != "# B\n" {
+		t.Fatalf("the first sync applied a deletion that was undone:\n%s", h.log)
+	}
+
+	// The same replay with a local edit pending must leave the edit where it is.
+	h.write("/infra/b.md", "# B mine\n")
+	_ = h.state.SetLastSeq(0)
+	if err := h.e.catchUp(context.Background(), h.remote); err != nil {
+		t.Fatal(err)
+	}
+	if !h.exists("/infra/b.md") || h.file("/infra/b.md") != "# B mine\n" {
+		t.Fatalf("a replayed deletion took the local edit away:\n%s", h.log)
+	}
+	if rec := h.rec(docB); rec == nil || rec.Version != 2 {
+		t.Fatalf("record after the replay: %+v", rec)
 	}
 }
 

@@ -645,10 +645,17 @@ func (e *Engine) noLongerReadable(rec DocRecord, why string) {
 
 // remoteDeleted follows a deletion made in the module. An unchanged file goes; a changed one is
 // moved aside, so nothing typed is lost.
-func (e *Engine) remoteDeleted(id string) error {
+//
+// version is the document's version when it was deleted, 0 if unknown. A deletion does not make
+// a version and a restore does, so a record already past it means the deletion was undone: the
+// feed read from its start replays every deletion a later restore reverted.
+func (e *Engine) remoteDeleted(id string, version int) error {
 	rec, err := e.state.Doc(id)
 	if err != nil || rec == nil {
 		return err
+	}
+	if version > 0 && rec.Version > version {
+		return nil
 	}
 	local, err := localPath(e.cfg.Root, rec.Path)
 	if err != nil {
@@ -723,7 +730,7 @@ func (e *Engine) applyChange(ctx context.Context, r Remote, c docs.Change) error
 	}
 	switch c.Type {
 	case docs.TypeDocumentDeleted:
-		return e.remoteDeleted(c.DocumentID)
+		return e.remoteDeleted(c.DocumentID, c.Version)
 	case docs.TypeDocumentCreated, docs.TypeDocumentUpdated, docs.TypeDocumentMoved, docs.TypeDocumentRestored:
 		return e.remoteChanged(ctx, r, c.DocumentID, c.Path, c.Version)
 	}
@@ -771,7 +778,11 @@ func (e *Engine) applyNotification(ctx context.Context, r Remote, n docs.Notific
 		return nil
 	case docs.TypeDocumentDeleted:
 		if n.Entity != nil {
-			return e.remoteDeleted(n.Entity.ID)
+			v := 0
+			if n.Snapshot != nil {
+				v = n.Snapshot.Version
+			}
+			return e.remoteDeleted(n.Entity.ID, v)
 		}
 	case docs.TypeDocumentCreated, docs.TypeDocumentUpdated, docs.TypeDocumentMoved, docs.TypeDocumentRestored:
 		if n.Entity == nil {

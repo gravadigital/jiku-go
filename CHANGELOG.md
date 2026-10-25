@@ -127,6 +127,11 @@ All notable changes to this project are documented here. The format follows
   it, within a round trip; a refusal left on the connection by an earlier ping does not count.
 - **`jiku doctor` printed "available — jiku-docs, ping 0s" for an identity that may not ping.**
   No ping was sent; the line now says the module is available but unverified.
+- **`jiku docs sync` applied deletions that a restore had undone.** Reading the change feed from
+  its start — every first sync, and after `invalid_cursor` — replays the whole past, deletions
+  included. The file of a restored document was removed and downloaded again, and one with local
+  edits was moved to `.jiku-docs/sin-acceso/`. A deletion older than the version already held is
+  now skipped.
 
 ### Changed
 
