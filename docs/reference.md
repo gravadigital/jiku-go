@@ -1225,7 +1225,8 @@ func NewClient(bus Bus, opts Options) *Client
 | `GetDocument(ctx, id, GetOptions)` | `documents.get` |
 | `GetContent(ctx, ref, GetOptions)` | id or path; inline content or `contentUrl`, checked against the checksum |
 | `New(ctx, NewDocument)` / `Put(ctx, id, content, PutOptions)` | id and checksum computed; inline or by URL |
-| `Move`, `Delete`, `Restore`, `Versions` | always with a base version |
+| `Move`, `Delete`, `Restore` | always with a base version |
+| `Versions(ctx, id)` / `ListVersions(ctx, id, VersionsOptions)` | the history, newest first; `VersionsOptions{ProtectedOnly, Kind}` filters on the module |
 | `Lock(ctx, id, LockOptions)` / `Unlock(ctx, id, session, force)` | session generated if none |
 | `Search(ctx, SearchQuery)` / `Changes(ctx, sinceSeq, limit, pathPrefix)` | |
 | `ResolveDocument`, `ResolveDocumentID`, `ResolveFolder`, `Children` | paths to ids; folder contents |
@@ -1234,9 +1235,23 @@ func NewClient(bus Bus, opts Options) *Client
 | `Notifications(ctx)` | the identity's `docs-notify` subject |
 
 Free functions: `NewID`, `ValidID`, `Checksum`, `DetectMimeType`, `NotifySubject`,
-`CurrentVersion`, `LockHolder`, `IsNotFound`, `Hint`. Sentinels `ErrNotFound`,
-`ErrContentMismatch`. One `Code…` constant per code of the module's catalog (30, pinned against
+`CurrentVersion`, `LockHolder`, `PrunedVersion`, `IsNotFound`, `Hint`. Sentinels `ErrNotFound`,
+`ErrContentMismatch`. One `Code…` constant per code of the module's catalog (31, pinned against
 its contracts in both directions), `WarningPossibleSecret`, and the `Type…` notification types.
+
+History compaction:
+
+```go
+type VersionKind string // VersionCreate, VersionUpdate, VersionRestore
+// Version gains Kind VersionKind and Protected bool; Document gains PrunedVersionsCount *int
+// (nil: the module did not say). A module without compaction sends none of them.
+type Pruned struct { RequestedVersion int; PreviousAvailable, NextAvailable *int } // nil: none kept on that side
+func PrunedVersion(err error) (*Pruned, bool) // from CodeVersionPruned
+```
+
+`CodeVersionPruned` answers `documents.get` with `version`, `restore` with `fromVersion` and a
+pinned `Share`; an external user gets `CodeDocumentNotFound` instead. `jiku docs get --version`,
+`restore` and `share --pinned` print the nearest versions kept and exit 5.
 
 - **[contract] Every creation takes a client-generated ULID**, and a retry with the same id is the
   same creation. Generate it once per intended creation, never per attempt.

@@ -21,7 +21,11 @@ export JIKU_VIA=agent
    the version you read: `/infra/servidores/staging.md` (v7).
 3. **Save only what the person accepted.** Show the change; write it only after they agree. Use
    `--message` to say what changed.
-4. **Never `share` or `revoke` without explicit confirmation.** A shared link lets anyone with the
+4. **Finish an important piece of work with `--message`.** A version saved with a message is
+   protected: the module never removes it. Your saves without one are compacted like a person's
+   — after a day only the last of each editing session is kept, after 30 days the last of each
+   day — so the point you want to be able to return to needs a message.
+5. **Never `share` or `revoke` without explicit confirmation.** A shared link lets anyone with the
    URL read the document, signed in or not. The CLI cannot ask for you; you must.
 
 ## How to work on a document
@@ -57,6 +61,7 @@ jiku docs get <path> -o json        # content, version, checksum and lock in one
 | `lock_not_held` | Your lock expired or was taken. Take it again and re-read before saving. |
 | `frontmatter_invalid` / `invalid_relation` | The YAML at the top is wrong, or names a Jiku id that does not exist or you cannot see. Fix it; the details name the line or the id. |
 | `permission_denied` | You can read this but not change it. Tell the person. |
+| `version_pruned` | The earlier version you asked for (`get --version`, `restore --from-version`) was removed by history compaction. The error names the nearest versions kept; use one of them, or `jiku docs history` to choose. Exit status 5. |
 | `*_not_found` | It does not exist **or** you may not see it — the two are not distinguished. |
 
 A `possible_secret_detected` warning on a save means the text may contain a credential. Tell the

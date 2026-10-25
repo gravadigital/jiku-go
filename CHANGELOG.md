@@ -107,6 +107,21 @@ All notable changes to this project are documented here. The format follows
   `protocol.md`, `auth.md`, the README and `CONTRACT.md` — which records the docs module as a
   plane with a pin of its own, leaving core's untouched — describe the module planes.
 
+- **The docs module's history compaction.** The module now removes intermediate versions after a
+  day, keeping the last of each editing session and, after 30 days, the last of each day; the
+  first, the current, those saved with a message, a service's, restores and pinned ones are
+  protected. `modules/docs` adds `CodeVersionPruned` with `PrunedVersion(err)` (the version asked
+  for and the nearest kept on either side, nil for none) and a `Hint` naming them; `Version.Kind`
+  (`VersionCreate`, `VersionUpdate`, `VersionRestore`) and `Version.Protected`;
+  `Document.PrunedVersionsCount` (nil when the module does not say); and `ListVersions` with
+  `VersionsOptions{ProtectedOnly, Kind}`. Replies from a module without compaction decode as
+  before. `jiku docs history` shows kind and protection (`*` in `-o table`), takes
+  `--protected`, and closes with how many versions were compacted. `get --version`, `restore`
+  and `share --pinned` on a compacted version print the nearest versions kept and **exit 5**.
+  `put --message` says it protects the version, and [docs/agents.md](docs/agents.md) asks agents
+  to finish important work with a message. `jiku docs sync` reads only current versions and
+  needed no change.
+
 ### Fixed
 
 - **Every plane but core's commands got core's read-plane identity list.** The rule was "the

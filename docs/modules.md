@@ -192,7 +192,7 @@ against the module's plane. `meta.describe` is the authority on resources, field
 | `New(ctx, NewDocument)` | generates the ULID when none is given, computes `sha256:<hex>`, goes by URL above 256 KiB (or when the module answers `content_too_large` inline) |
 | `Put(ctx, id, content, PutOptions)` | `documents.{id}.update` with `baseVersion` (required), session, message, `via`, same transport choice |
 | `Move`, `Delete`, `Restore` | always with `baseVersion` |
-| `Versions(ctx, id)` | `documents.versions.list`, every page |
+| `Versions(ctx, id)` / `ListVersions(ctx, id, VersionsOptions)` | `documents.versions.list`, every page; `ListVersions` filters on `protected` and `kind` |
 | `Lock(ctx, id, LockOptions)` / `Unlock(ctx, id, sessionID, force)` | session ULID generated when none is given; repeating `Lock` with the same session renews |
 | `Search(ctx, SearchQuery)` | `documents.search` |
 | `Changes(ctx, sinceSeq, limit, pathPrefix)` | one page of `documents.changes` |
@@ -204,7 +204,8 @@ against the module's plane. `meta.describe` is the authority on resources, field
 
 Free functions: `NewID()` (a ULID), `ValidID`, `Checksum([]byte)` (`sha256:<hex>`),
 `ViaFromEnv()`, `DetectMimeType`, `NotifySubject(instance, userID)`, `CurrentVersion(err)` (from
-`version_conflict`), `LockHolder(err)` (from `document_locked`), `IsNotFound(err)`, and
+`version_conflict`), `LockHolder(err)` (from `document_locked`), `PrunedVersion(err)` (from
+`version_pruned`: the version asked for and the nearest kept, either side nil), `IsNotFound(err)`, and
 `Hint(err)` — advice for the codes whose fix is not obvious, written for a person or an agent.
 Sentinels: `ErrNotFound` (a path that resolves to nothing; the module is asked by id) and
 `ErrContentMismatch` (content that does not hash to its checksum). Notification types:
@@ -221,7 +222,7 @@ One constant per code in the module's catalog, for use with `jiku.IsCode`:
 `CodeQueryTimeout`, `CodeUnknownCaller`, `CodeCallerNotAuthorized`, `CodeUpstreamUnavailable`,
 `CodeInternalError`, `CodeShareNotFound`, `CodeSharingBlocked`, `CodeShareExpiryInvalid`,
 `CodeSecretWarningNotAcknowledged`, `CodeSemanticSearchNotConfigured`,
-`CodeAttachmentsNotConfigured`. Plus `WarningPossibleSecret` for the non-blocking warning a
+`CodeAttachmentsNotConfigured`, `CodeVersionPruned`. Plus `WarningPossibleSecret` for the non-blocking warning a
 write may carry. The catalog is the module's and is not closed: an unknown code still arrives as
 a `*jiku.Error`.
 
@@ -242,6 +243,7 @@ the command exits non-zero and says which case it is:
 | `protocol` other than `v1` | the module speaks another protocol; upgrade this client | 3 |
 | key present, ping unanswered | the module is installed and down | 4 |
 | the bus refused the registry or the ping | the grant lines that are missing | 1 |
+| an earlier version that history compaction removed (`version_pruned`) | the nearest versions kept, before and after | 5 |
 
 The specific codes are a convenience for scripts and, like every non-zero code here, not covered
 by semver; zero versus non-zero is.
@@ -261,13 +263,13 @@ Ergonomic. Wherever a document or folder goes, an id or a path is accepted:
 |---|---|
 | `ls [path]` | |
 | `search <text>` | `--mode --filter --limit` |
-| `get <doc>` | `--version`; markdown to stdout, version/checksum/lock to stderr; `-o json` for everything |
+| `get <doc>` | `--version`; markdown to stdout, version/checksum/lock to stderr; `-o json` for everything; a compacted `--version` exits 5 naming the nearest versions kept |
 | `put <doc> <file\|->` | `--base-version` (required) `--session --message` |
 | `new <file\|-> --folder <folder>` | `--name --id --message` |
 | `mv <doc> <dest>` | `--base-version` (required) `--session`; `<dest>` is a folder, or a path ending in `.md` to rename |
 | `rm <doc>` | `--base-version` (required) |
-| `restore <doc>` | `--from-version --base-version` (both required) |
-| `history <doc>` | |
+| `restore <doc>` | `--from-version --base-version` (both required); a compacted `--from-version` exits 5 |
+| `history <doc>` | `--protected`; kind and protection per version (`*` in `-o table`), and on stderr how many were compacted |
 | `lock <doc>` | `--session --ttl`; prints the session to reuse |
 | `unlock <doc>` | `--session` (required) `--force` |
 | `attach <doc> <file>` | `--name --mime`; prints the link for the markdown |

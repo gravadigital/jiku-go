@@ -70,6 +70,42 @@ jiku docs history /infra/servidores/staging.md
 stderr — so redirecting stdout gives a clean file and the version is still on screen. Content
 above 256 KiB comes through a presigned URL; `get` follows it and checks the checksum either way.
 
+## History and compaction
+
+Every save is a new version, and editors that save every few seconds make thousands a day. The
+module keeps all of them for a day and then compacts the history:
+
+| Age | Kept |
+|---|---|
+| under 24 h | every version |
+| 24 h to 30 days | the last version of each editing session — one author, one `via`, no pause of 30 minutes |
+| over 30 days | the last version of each day |
+| any | the protected versions |
+
+**Protected** versions are never removed: the first and the current one, every version saved with
+`--message`, every one written by a service, every restore, and any version a live pinned link
+shows. An agent's versions follow the same rule as a person's; a change of `via` ends a session,
+so the two never merge. To keep a point you want to return to, save it with a message:
+
+```bash
+jiku docs put /infra/staging.md staging.md --base-version 7 --message "Versión enviada al cliente"
+```
+
+```bash
+jiku docs history /infra/staging.md -o table        # kind, and * on protected versions
+jiku docs history /infra/staging.md --protected     # only the ones kept forever
+```
+
+`history` lists the versions kept, newest first, with their `kind` (`create`, `update`,
+`restore`) and `protected`; the numbers can have gaps. A last line on stderr says how many were
+compacted. Against a module without compaction there is no such line, and `--protected` is
+refused.
+
+Asking for a compacted version — `get --version`, `restore --from-version`, `share --pinned
+--version` — answers `version_pruned`. The command prints the nearest versions kept, before and
+after, on stderr and **exits 5**. An external user is never told the history has gaps: for them
+any earlier version is `document_not_found`, as before.
+
 The generic commands reach everything else, with the module's own contract:
 
 ```bash
@@ -185,6 +221,7 @@ edits back.
 | **Deleted in Jiku** | An unchanged file is removed; one with local edits is moved aside. |
 | **No longer readable** | Moved to `.jiku-docs/sin-acceso/`, never deleted. |
 | **Read-only folders** | Their files are read-only on disk. A forced local edit is not uploaded. |
+| **Compaction** | Irrelevant to it: it only ever downloads current versions, and a conflict copy is the current version too. A base version that was compacted still compares as before. |
 | **Ignored** | Files that are not `.md` (said once), hidden files and folders, `*.swp`, `*~`, `#…#`, the conflict copies, and `.jiku-docs/`. Attachments are not downloaded. |
 | **Module down** | Works offline: edits stay on disk and are uploaded when it answers again. |
 | **Module uninstalled** | Stops syncing and says so; every file stays. It resumes if the module comes back. |
