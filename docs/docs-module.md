@@ -202,10 +202,11 @@ and what an agent writes is written in the name of the person it works for.
 ## The sync daemon
 
 ```bash
-jiku docs sync                                   # ~/JikuDocs
-jiku docs sync ~/trabajo/docs --only /clientes/acme/ --only /buenas-practicas/
+jiku docs sync                                   # ~/JikuDocs, or `root` from docs-sync.yaml
+jiku docs sync ~/trabajo/docs --include /clientes/acme/ --exclude /clientes/acme/archivo/
 jiku docs sync --once                            # reconcile once and exit (cron, tests)
 jiku docs sync status                            # what happened, what is pending
+systemctl --user enable --now jiku-docs-sync     # the same, as a service (below)
 ```
 
 It keeps a local folder equal to the documents you can read, with the same paths, and sends your
@@ -214,22 +215,48 @@ edits back.
 | | |
 |---|---|
 | **From Jiku** | Live notifications bring a change in seconds; the file is replaced atomically (written beside it, then renamed), so an open editor reloads it once. |
-| **To Jiku** | A file that has not changed for 2 s is uploaded on top of the version it was made from, recorded as yours, `via: human`. |
+| **To Jiku** | A file that has not changed for 2 s (`debounce`) is uploaded on top of the version it was made from, recorded as yours, `via: human`. |
 | **Conflicts** | Never resolved by overwriting. The remote version is written beside yours as `<name>.remoto-v<version>.md`. Merge it into your file and **delete the copy**: that is what tells the daemon to upload the merge. Until then the file waits. |
 | **New files** | A new `.md` in a folder that exists in Jiku, where you can write, becomes a document. Folders are created in Jiku, not by the daemon. |
 | **Deleting a file** | Does not delete the document; it comes back. `jiku docs rm` deletes. |
 | **Deleted in Jiku** | An unchanged file is removed; one with local edits is moved aside. |
-| **No longer readable** | Moved to `.jiku-docs/sin-acceso/`, never deleted. |
+| **No longer readable** | Moved to `<folder>/.sin-acceso/`, never deleted. |
 | **Read-only folders** | Their files are read-only on disk. A forced local edit is not uploaded. |
 | **Compaction** | Irrelevant to it: it only ever downloads current versions, and a conflict copy is the current version too. A base version that was compacted still compares as before. |
-| **Ignored** | Files that are not `.md` (said once), hidden files and folders, `*.swp`, `*~`, `#…#`, the conflict copies, and `.jiku-docs/`. Attachments are not downloaded. |
+| **Ignored** | Files that are not `.md` (said once), hidden files and folders (`.sin-acceso/` among them), `*.swp`, `*~`, `#…#` and the conflict copies. Attachments are not downloaded. |
 | **Module down** | Works offline: edits stay on disk and are uploaded when it answers again. |
-| **Module uninstalled** | Stops syncing and says so; every file stays. It resumes if the module comes back. |
+| **Module uninstalled** | Stops syncing and says so; every file stays and the process keeps running. It resumes when the module comes back. |
+| **Stopped** | Edits still waiting for their debounce are uploaded before it exits. |
+
+### Configuration
+
+`~/.config/jiku/docs-sync.yaml` (beside `config.yaml`; `JIKU_DOCS_SYNC_CONFIG` names another
+file). Every key is optional:
+
+```yaml
+root: ~/JikuDocs                    # the local folder
+include: ["/clientes/acme/", "/infra/"]   # empty: everything you can read
+exclude: ["/clientes/acme/archivo/"]      # taken out of what include selects
+debounce: 2s                        # quiet time before a file is uploaded
+notifications: true                 # desktop notifications
+log_level: info                     # debug | info | warn | error
+```
+
+Precedence is flags, then `JIKU_DOCS_SYNC_ROOT`, `_INCLUDE`, `_EXCLUDE` (comma separated),
+`_DEBOUNCE`, `_NOTIFICATIONS`, `_LOG_LEVEL`, then the file. The folder argument is a flag here,
+and `--only` is the older name of `--include`. An unknown key or an invalid value stops the
+daemon with exit status 78 and the line: `docs-sync.yaml:6: unknown key "notificaciones"`.
+
+The connection is **not** configured here: the daemon uses the same configuration and login as
+every other `jiku` command, so the service and a `jiku` typed by hand always mean the same
+deployment. To try another deployment, run `jiku docs sync` in the foreground with `--instance`
+or `JIKU_INSTANCE`; its state is kept apart (below).
 
 ### What it does on the wire
 
 - At start, and on every reconnect, it reads the change feed (`documents.changes`) from where it
-  left off. Every five minutes it does so again, as a net under the live notifications.
+  left off. Every 30 seconds it does so again: a net under the live notifications, and how an idle
+  daemon notices that the module went down, since a person may not ping it.
 - On `access.changed`, when the feed no longer reaches back far enough (`invalid_cursor`), and
   every 24 hours, it reconciles **in full**: the whole readable list against its state.
 - It subscribes to its notifications **before** catching up, so a change in between is seen twice
@@ -240,38 +267,90 @@ edits back.
 
 ### State
 
-`<folder>/.jiku-docs/state.db` is SQLite (a pure-Go driver: the binary stays static). It holds,
-per document, the id, path, version and checksum the file was last made equal to, plus the feed
-position, the last full reconciliation and the recent events `sync status` shows. A folder is
-bound to the identity that first synced it; another identity is refused, since what one person
-may read is not what another may. Only one daemon may run per folder.
+| What | Where |
+|---|---|
+| State (SQLite: per document the id, path, version and checksum the file was last made equal to; the feed position; the last full reconciliation; recent events) | `$XDG_STATE_HOME/jiku-docs/<instance>/state.db` (`~/.local/state/...`) |
+| Single-instance lock | `$XDG_STATE_HOME/jiku-docs/<instance>/sync.lock` |
+| Documents | the folder; files no longer readable in `<folder>/.sin-acceso/` |
 
-### Running it as a service
+The SQLite driver is pure Go, so the binary stays static. The state is **per instance**, so a
+foreground sync against another deployment never touches the service's. It remembers its folder
+and its identity: pointed at another folder, the old state is set aside as `state.<time>.db` and a
+fresh one started; another identity is refused (exit 78), since what one person may read is not
+what another may. One daemon runs per instance — a second one exits 1 without touching anything.
 
-The daemon needs no terminal. For a person, `jiku login` once (the stored session is refreshed);
-for unattended use, a key file (`JIKU_KEY_FILE`). A systemd user unit:
+Earlier builds kept the state in `<folder>/.jiku-docs/`. The first start moves `state.db` to the
+new place and `sin-acceso/` to `<folder>/.sin-acceso/`, and removes the old folder. A daemon of
+the earlier build still running on the folder is detected by its lock and refused.
 
-```ini
-# ~/.config/systemd/user/jiku-docs-sync.service
-[Unit]
-Description=Jiku docs sync
-After=network-online.target
+### As a systemd user service
 
-[Service]
-ExecStart=%h/.local/bin/jiku docs sync
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=default.target
-```
+The `.deb` and `.rpm` packages install the unit `/usr/lib/systemd/user/jiku-docs-sync.service`.
+It runs `/usr/bin/jiku docs sync` with your session's login and configuration: it starts when you
+log in, stops when you log out, and is restarted if it fails. The package never enables it.
 
 ```bash
+jiku login
 systemctl --user enable --now jiku-docs-sync
-journalctl --user -u jiku-docs-sync -f        # the log is on stderr
 ```
 
-On macOS, a launchd agent running the same command does the same.
+| Task | Command |
+|---|---|
+| First time | `jiku login`, then `systemctl --user enable --now jiku-docs-sync` |
+| See its state | `jiku docs sync status` or `systemctl --user status jiku-docs-sync` |
+| See the log | `journalctl --user -u jiku-docs-sync -f` (`-p warning` for warnings and errors only) |
+| Apply a configuration change | `systemctl --user restart jiku-docs-sync` |
+| Stop it for now | `systemctl --user stop jiku-docs-sync` |
+| Turn it off | `systemctl --user disable --now jiku-docs-sync` |
+| After upgrading the package | `systemctl --user restart jiku-docs-sync` (`daemon-reload` first if the unit changed) |
+
+**What the unit does.** `Type=notify`: the daemon reports ready once its configuration is loaded,
+its lock taken and the folder watched — even offline — and from then on keeps a one-line status
+that `systemctl --user status` shows: `Sincronizado · 1.240 documentos · último cambio 14:32`,
+`Reconciliando…`, `Subiendo 3 cambios`, `Sin conexión, reintentando`,
+`Módulo de documentación no disponible`, `Módulo de documentación no instalado`,
+`2 conflictos pendientes`. `WatchdogSec=60`: its main loop checks in every 30 s, and a loop that
+hangs without dying is killed and restarted. `Restart=on-failure` after 10 s, at most five times
+in five minutes. `TimeoutStopSec=30` leaves time to upload what is pending on stop.
+`NoNewPrivileges=yes` is its only hardening: filesystem isolation (`ProtectSystem=`,
+`ReadWritePaths=`) is silently ignored in a user service on Ubuntu 26.04 / systemd 259, so it is
+not pretended.
+
+**Exit status.** 0 stopped; 1 unexpected, restarted; **77** the stored login was refused by
+Zitadel (`invalid_grant`), or there is none — `jiku login`, which restarts the service by itself
+when it is enabled; **78** the configuration is invalid, with the line in the log. systemd does
+not restart on 77 or 78 (`RestartPreventExitStatus`), since a restart cannot fix either. Zitadel
+or the bus being out of reach is not an error: the daemon stays up, offline, and retries.
+
+**Logs.** stderr, which journald collects. Under journald each line carries its syslog priority,
+so `journalctl -p` filters; in a terminal it carries the time instead. Lines name paths, ids,
+versions and codes — never a document's content.
+
+**Desktop notifications** go through `org.freedesktop.Notifications` on the session bus: a
+conflict, a file that could not be uploaded (read-only folder, not `.md`, invalid frontmatter,
+folder missing in Jiku), the module down for more than five minutes, the module uninstalled
+(critical), the login refused (critical). Each kind is said at most once every five minutes per
+file, and a burst becomes one notification: "Conflicto en /infra/a.md y 19 archivos más". With no
+session bus they are skipped; the log has the same facts. `notifications: false` turns them off.
+
+**Credentials** stay in `~/.config/jiku/tokens-<instance>.json` (mode 0600), shared with `jiku`
+by hand. Zitadel rotates the refresh token on every use and refuses the previous one, so the two
+processes take a lock (`tokens-<instance>.json.lock`) around a refresh and re-read the file first:
+neither spends a refresh token the other already replaced.
+
+#### Common problems
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `failed` with status 77 | The login expired or was revoked | `jiku login` (it restarts the service when enabled) |
+| `failed` with status 78 | Invalid configuration | `journalctl --user -u jiku-docs-sync -p err` names the line; fix `docs-sync.yaml`, then `systemctl --user restart jiku-docs-sync` |
+| `failed` with neither | It failed five times in five minutes | Read `journalctl`; `systemctl --user reset-failed jiku-docs-sync`, then `start` |
+| "another `jiku docs sync` is already running" | `jiku docs sync` run by hand while the service runs | Use one or the other |
+| Status stays `Sin conexión, reintentando` | No network, Zitadel or the bus out of reach | It retries by itself; `jiku doctor` names the broken link |
+| Status `Módulo de documentación no instalado` | The module was uninstalled | Nothing to do: it resumes when the module is back |
+
+`jiku docs sync` in the foreground keeps working exactly the same, for debugging or for anyone
+who prefers no service; outside systemd every notification to it is a no-op.
 
 ## Permissions
 

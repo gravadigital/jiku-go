@@ -18,6 +18,10 @@ go install github.com/gravadigital/jiku-go/cmd/jiku@latest   # the CLI
 go get github.com/gravadigital/jiku-go                       # the library
 ```
 
+On Debian, Ubuntu or Fedora, the `.deb` and `.rpm` attached to each release install the CLI as
+`/usr/bin/jiku` together with the `jiku-docs-sync` systemd user service, which each person
+enables after logging in (`jiku login`, then `systemctl --user enable --now jiku-docs-sync`).
+
 [![Go Reference](https://pkg.go.dev/badge/github.com/gravadigital/jiku-go.svg)](https://pkg.go.dev/github.com/gravadigital/jiku-go)
 
 ---
@@ -235,6 +239,7 @@ jiku docs get /infra/servidores/staging.md > staging.md
 jiku docs put /infra/servidores/staging.md staging.md --base-version 7 --message "Puerto SSH"
 jiku docs edit /infra/servidores/staging.md           # lock, $EDITOR, save, release
 jiku docs sync                                        # mirror ~/JikuDocs both ways
+systemctl --user enable --now jiku-docs-sync          # ...as a systemd user service
 ```
 
 Paths work wherever ids do, every change carries `--base-version`, and `JIKU_VIA=agent` marks an
@@ -526,6 +531,9 @@ go get github.com/gravadigital/jiku-go@v1
   the wire shape `List` and `Get` produce.
 - The `Config` fields and their meaning, and the `JIKU_*` environment variable names.
 - The CLI's command and flag names, and whether it exits zero.
+- For `jiku docs sync`: its configuration keys (`docs-sync.yaml`, `JIKU_DOCS_SYNC_*`), the
+  systemd unit's name, and exit statuses **77** (login refused) and **78** (invalid
+  configuration), which the unit depends on.
 
 **Not covered. These can change in a patch or minor release:**
 
@@ -533,7 +541,9 @@ go get github.com/gravadigital/jiku-go@v1
   `ErrNoEndpoint`, …) and on `IsCode`, never on message text. The wording exists to be improved.
 - **The CLI's human-readable output** — tables, `doctor`'s prose, progress on stderr. `-o json`
   is stable in as much as it passes the server's own data through; the framing around it is not.
-  Specific non-zero exit codes are not covered either, only zero versus non-zero.
+  Specific non-zero exit codes are not covered either, only zero versus non-zero — except the
+  two of `jiku docs sync` named above. The daemon's `STATUS` texts and notifications are prose
+  too. Hidden flags (`--debug-hang-after`, a watchdog test hook) are not covered.
 - **Struct growth.** Fields may be *added* to `Contract`, `Resource`, `Variant` and `Field` as
   `meta.describe` grows. Adding a field is backward-compatible in Go unless you build these with
   unkeyed composite literals — so use field names, and treat these four types as read-only data
@@ -561,7 +571,9 @@ git push origin main v1.1.0
 ```
 
 Pushing the tag runs [`release.yml`](.github/workflows/release.yml): the full gate again against
-that exact commit, then cross-compiled binaries and checksums attached to a GitHub release.
+that exact commit, then cross-compiled binaries, the `.deb` and `.rpm` packages (`make packages`:
+GoReleaser and nfpm, [`.goreleaser.yaml`](.goreleaser.yaml)) and one checksum file for all of
+them, attached to a GitHub release. `make dist packages SNAPSHOT=1` builds the same locally.
 
 **A published tag is permanent.** For a Go module the tag *is* the release — the first time
 anyone asks for it, `proxy.golang.org` fetches and caches it. Deleting the tag from GitHub does
@@ -609,6 +621,8 @@ help carries the same explanations as these documents.
 /modules/         package modules — the registry of optional modules (opt-in)
 /modules/docs/    package docs — the docs module's client
 /internal/docsync the engine of `jiku docs sync`; not importable, promises nothing
+/internal/systemd sd_notify, journald, the user manager and desktop notifications, for the daemon
+/packaging/       the systemd user unit, the example configuration, the package scripts
 /cmd/jiku/         the CLI, a thin shell over the library
 /docs/            protocol, auth, library and command-reference guides
 /tools/gendocs/   regenerates docs/commands.md from Jiku's own contract — never hand-edit it
@@ -634,6 +648,7 @@ compatibility promise on purpose.
 make ci         # gofmt + go vet + go test -race — exactly what CI runs
 make build      # ./bin/jiku
 make dist       # cross-compiled binaries + checksums
+make packages SNAPSHOT=1   # + the .deb and .rpm, without a tag
 make help       # every target
 ```
 

@@ -9,6 +9,49 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`jiku docs sync` as a systemd user service, and `.deb`/`.rpm` packages.** The packages
+  (GoReleaser + nfpm, `make packages`, attached to each release beside the binaries) install
+  `/usr/bin/jiku`, the unit `/usr/lib/systemd/user/jiku-docs-sync.service` and
+  `/usr/share/doc/jiku/docs-sync.example.yaml`, and enable nothing: `jiku login`, then
+  `systemctl --user enable --now jiku-docs-sync`. The unit is `Type=notify` with
+  `WatchdogSec=60`, `Restart=on-failure` (10 s, at most 5 in 5 min), `TimeoutStopSec=30` and
+  `NoNewPrivileges=yes`; filesystem isolation is left out because a user service on Ubuntu 26.04
+  / systemd 259 ignores it silently. The daemon:
+  - speaks `sd_notify` (written here, no dependency; abstract sockets too): `READY=1` once the
+    configuration is loaded, the lock taken and the folder watched, even offline; a `STATUS=`
+    line (`Sincronizado · 1.240 documentos · último cambio 14:32`, `Reconciliando…`,
+    `Subiendo 3 cambios`, `Sin conexión, reintentando`, `Módulo de documentación no disponible`,
+    `Módulo de documentación no instalado`, `2 conflictos pendientes`); `WATCHDOG=1` from its main
+    loop; `STOPPING=1` on SIGTERM, after which edits still in their debounce are uploaded. Outside
+    systemd all of it is a no-op.
+  - exits **77** when Zitadel refuses the stored login (`invalid_grant`) or there is none, at
+    start or at a reconnect hours later, and **78** on an invalid configuration, naming the line.
+    The unit does not restart on either. Zitadel or the bus out of reach is not an exit: it
+    stays up, offline, and retries. A module that is uninstalled keeps it running, waiting.
+  - reads `~/.config/jiku/docs-sync.yaml` (`root`, `include`, `exclude`, `debounce`,
+    `notifications`, `log_level`; `JIKU_DOCS_SYNC_CONFIG` names another file), overridden by
+    `JIKU_DOCS_SYNC_*` and by flags. New flags `--include` (`--only` stays, as its alias),
+    `--exclude`, `--debounce`, `--notifications`, `--log-level`.
+  - writes syslog priority prefixes when stderr is the journal (`JOURNAL_STREAM`), so
+    `journalctl -p warning` works, and never a document's content.
+  - sends desktop notifications through `org.freedesktop.Notifications` — conflicts, files not
+    uploaded, the module down for five minutes or uninstalled, the login refused — at most one
+    per kind and file every five minutes, a burst gathered into one ("y 19 archivos más").
+    Without a session bus they are skipped.
+  - reads the change feed every 30 s instead of every 5 min: it is how an idle daemon notices
+    the module is down, since a person may not ping it.
+
+  `jiku docs sync status` follows the service's specification (Servicio, Carpeta, Documentos,
+  Último cambio, Pendientes, Conflictos), the first line asked of the user manager over D-Bus and
+  left out when it cannot be. `jiku login` restarts the service when it is enabled.
+
+  **New dependency: `github.com/godbus/dbus/v5`**, pure Go (the binaries stay `CGO_ENABLED=0`),
+  for the three D-Bus conversations: desktop notifications, the user manager's unit state for
+  `sync status`, and the restart from `jiku login`. Hand-writing D-Bus's authentication and
+  marshalling for three calls would be more code to trust than the library, which is the
+  reference Go implementation; `sd_notify`, a single datagram, is written here instead. It is
+  used only by the CLI (`internal/systemd`), never by the library packages.
+
 - **A plane is now something a client is pointed at, not something it assumes.** `Client.On(p)`
   returns a `PlaneClient` with `Query`, `Command`, `Request`, `List`, `ListInto`, `Get`,
   `Iterate`, `All`, `Describe` and `Contract` against any plane that speaks core's grammar —
@@ -168,6 +211,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **`jiku docs sync` keeps its state in `$XDG_STATE_HOME/jiku-docs/<instance>/`** (`state.db`,
+  `sync.lock`), no longer in `<folder>/.jiku-docs/`, and one daemon runs per instance rather than
+  per folder. Files no longer readable go to `<folder>/.sin-acceso/`. The state remembers its
+  folder: pointed at another, it is set aside and a fresh one started. The first start migrates
+  the old layout and removes `.jiku-docs/`. `jiku docs sync` with no folder uses `root` from the
+  configuration (default `~/JikuDocs`); `sync status` reads the instance's state.
 - The text of `ErrFailure` and `ErrTimeout` no longer says "core", since a module can be the one
   that failed or did not answer. Message text is not covered by the compatibility policy; match
   the sentinels with `errors.Is`, as before.

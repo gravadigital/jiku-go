@@ -27,6 +27,10 @@ export JIKU_VIA=agent
    day — so the point you want to be able to return to needs a message.
 5. **Never `share` or `revoke` without explicit confirmation.** A shared link lets anyone with the
    URL read the document, signed in or not. The CLI cannot ask for you; you must.
+6. **Do not write through the person's synced folder.** If `jiku docs sync` runs (the
+   `jiku-docs-sync` service; `jiku docs sync status` says), its folder is theirs: a file you edit
+   there is uploaded as `via: human`, in their name. Read it if useful; write with `jiku docs put`.
+   Do not start a second `jiku docs sync` either — it is refused while the service runs.
 
 ## How to work on a document
 

@@ -277,7 +277,7 @@ Ergonomic. Wherever a document or folder goes, an id or a path is accepted:
 | `shares <doc>` | `--status` |
 | `revoke <shareId>` | |
 | `edit <doc>` | `--ttl`; lock, `$VISUAL`/`$EDITOR`, renew while open, save, release |
-| `sync [dir]` | `--only <path>` (repeatable) `--once`; `sync status [dir]` |
+| `sync [dir]` | `--include <path>` (or `--only`) and `--exclude <path>` (repeatable), `--debounce`, `--notifications`, `--log-level`, `--once`; `sync status [dir]` |
 
 All of them: ULIDs for new ids, SHA-256 checksums, upload by URL above 256 KiB, `via` from
 `JIKU_VIA`. Data goes to stdout, progress and warnings to stderr.
@@ -285,25 +285,27 @@ All of them: ULIDs for new ids, SHA-256 checksums, upload by URL above 256 KiB, 
 ## 5. The sync daemon
 
 `jiku docs sync` mirrors what the person may read into a local folder (`~/JikuDocs/` unless a
-directory is given), with the same paths. It lives in `internal/docsync`, so none of its Go API
-is a promise — only the command, its flags and its on-disk layout are.
+directory is given, or `root` in `docs-sync.yaml`), with the same paths. It lives in
+`internal/docsync`, so none of its Go API is a promise — only the command, its flags, its
+configuration keys and its on-disk layout are. It runs as the systemd user service
+`jiku-docs-sync` (see [docs-module.md](docs-module.md#as-a-systemd-user-service)).
 
 | Aspect | Behaviour |
 |---|---|
-| State | `<dir>/.jiku-docs/state.db`, SQLite through a pure-Go driver (no CGO): id, path, version, checksum per document; `lastSeq`; last full reconciliation; conflicts; a short log |
+| State | `$XDG_STATE_HOME/jiku-docs/<instance>/state.db`, SQLite through a pure-Go driver (no CGO): id, path, version, checksum per document; `lastSeq`; last full reconciliation; conflicts; a short log |
 | Remote → local | `docs-notify` in real time. A newer version replaces the file atomically (temp + rename) unless the file has unsaved local changes, in which case the remote version is written beside it as `<name>.remoto-v<version>.md` and the person is told |
 | Local → remote | fsnotify, 2 s debounce per file, SHA-256 against the recorded version, `update` with `baseVersion` and `via: human`; a new `.md` in a synced folder becomes `documents.new` with an id kept in the state until it succeeds |
 | `version_conflict` | the remote version becomes a `.remoto-v<n>.md` copy; the local file is not uploaded again until that copy is deleted, which is how the person says "merged" |
 | `document_locked` | retried when `document.unlocked` arrives, or at the next pass |
-| Catch-up | `documents.changes` from `lastSeq` at start and on every reconnect |
+| Catch-up | `documents.changes` from `lastSeq` at start, on every reconnect and every 30 s |
 | Full reconciliation | at start without state, on `access.changed`, on `invalid_cursor`, and every 24 h: the readable list compared with the state |
-| No longer readable | moved to `.jiku-docs/sin-acceso/`, never deleted |
+| No longer readable | moved to `<dir>/.sin-acceso/`, never deleted |
 | Read-only folders | files whose folder grants only `read` are made read-only on disk |
-| Ignored | anything not `.md` (warned once), hidden files and folders, `*.swp`, `*~`, `.#*`, conflict copies, `.jiku-docs/` |
+| Ignored | anything not `.md` (warned once), hidden files and folders, `*.swp`, `*~`, `.#*`, conflict copies, `.sin-acceso/` |
 | Local deletion | not propagated: the file comes back at the next reconciliation; `jiku docs rm` deletes |
 | Module down | offline: nothing is lost, files keep being edited, and everything is reconciled when the ping answers again |
-| Registry key deleted | stops syncing and says so, leaving every file in place; resumes if the key comes back |
-| `sync status` | reads the state only: last sequence, last full pass, documents, pending local changes, conflicts, recent events |
+| Registry key deleted | stops syncing and says so, leaving every file in place; the process stays up and resumes when the key comes back |
+| `sync status` | reads the state only (plus the service's state from systemd, when it can be asked): folder, documents, last change, pending local changes, conflicts, recent events |
 
 The engine talks to the module and to the disk through interfaces, so it is tested without NATS
 and without fsnotify timing.
