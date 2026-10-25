@@ -809,3 +809,92 @@ func TestServiceStoreIsSeparateFromTheDeviceFlows(t *testing.T) {
 		t.Error("the service user and the device flow share a token file")
 	}
 }
+
+// rotatingIssuer is a stand-in Zitadel that rotates refresh tokens the way the real one does:
+// each refresh answers a new refresh token, and the one just used is refused from then on.
+type rotatingIssuer struct {
+	t         *testing.T
+	mu        sync.Mutex
+	current   string
+	n         int
+	refreshes int
+}
+
+func (ri *rotatingIssuer) server() *httptest.Server {
+	mux := http.NewServeMux()
+	var srv *httptest.Server
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"issuer":%q,"token_endpoint":%q}`, srv.URL, srv.URL+"/token")
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		// Slow enough that a second caller arrives while the first is still in flight.
+		time.Sleep(50 * time.Millisecond)
+		ri.mu.Lock()
+		defer ri.mu.Unlock()
+		if r.Form.Get("refresh_token") != ri.current {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":"invalid_grant","error_description":"Errors.OIDCSession.RefreshTokenInvalid"}`)
+			return
+		}
+		ri.n++
+		ri.refreshes++
+		ri.current = fmt.Sprintf("rt-%d", ri.n)
+		at := jwt(ri.t, map[string]any{"sub": "42", "exp": time.Now().Add(time.Hour).Unix()})
+		fmt.Fprintf(w, `{"access_token":%q,"refresh_token":%q,"expires_in":3600}`, at, ri.current)
+	})
+	srv = httptest.NewServer(mux)
+	return srv
+}
+
+// TestConcurrentRefreshesSpendTheRefreshTokenOnce: two token sources over the same token file —
+// the sync daemon and a `jiku` run by hand — find the access token expired at the same moment.
+// Without the cross-process lock both spend the same refresh token; Zitadel accepts the first
+// and refuses the second with invalid_grant, and that process reports a live session as one that
+// needs `jiku login`. Each flow opens the lock file itself, so this is the same flock contention
+// two processes have.
+func TestConcurrentRefreshesSpendTheRefreshTokenOnce(t *testing.T) {
+	isolateDiscoveryCache(t)
+	ri := &rotatingIssuer{t: t, current: "rt-0"}
+	srv := ri.server()
+	defer srv.Close()
+
+	path := filepath.Join(t.TempDir(), "tokens-dev.json")
+	stale := jwt(t, map[string]any{"sub": "42", "exp": time.Now().Add(-time.Minute).Unix()})
+	if err := (&FileStore{Path: path}).Save(Tokens{AccessToken: stale, RefreshToken: "rt-0"}); err != nil {
+		t.Fatal(err)
+	}
+
+	const n = 4
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		flow, err := NewDeviceFlow(DeviceConfig{Issuer: srv.URL, ClientID: "c", Store: &FileStore{Path: path}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Each flow loads the stale tokens before any refresh happens, as two processes
+		// started earlier would have.
+		flow.mu.Lock()
+		_ = flow.load()
+		flow.mu.Unlock()
+		wg.Add(1)
+		go func(i int, flow *DeviceFlow) {
+			defer wg.Done()
+			_, errs[i] = flow.Token(testContext())
+		}(i, flow)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("flow %d: %v", i, err)
+		}
+	}
+	if ri.refreshes != 1 {
+		t.Errorf("the refresh token was spent %d times, want once", ri.refreshes)
+	}
+	got, _ := (&FileStore{Path: path}).Load()
+	if got.RefreshToken != ri.current {
+		t.Errorf("the file holds %q, Zitadel's current refresh token is %q", got.RefreshToken, ri.current)
+	}
+}

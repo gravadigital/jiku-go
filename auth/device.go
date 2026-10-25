@@ -141,7 +141,7 @@ func (d *DeviceFlow) Token(ctx context.Context) (string, error) {
 		return d.tokens.AccessToken, nil
 	}
 	if d.tokens.RefreshToken != "" {
-		err := d.refresh(ctx)
+		err := d.refreshShared(ctx)
 		tr.finish(OriginRefreshed, err)
 		if err == nil {
 			return d.tokens.AccessToken, nil
@@ -315,8 +315,42 @@ func (d *DeviceFlow) poll(ctx context.Context, disc Discovery, auth DeviceAuth) 
 	}
 }
 
+// refreshLocker is a Store that can serialise refreshes across processes. FileStore is one;
+// it is unexported so that promise stays this package's business.
+type refreshLocker interface {
+	lockRefresh(ctx context.Context) (func(), error)
+}
+
+// refreshShared refreshes under the store's cross-process lock, and re-reads the store first:
+// another process may already have refreshed, and since Zitadel invalidates a refresh token
+// once it is used, spending the copy held in memory would be refused as invalid_grant — a
+// session that is perfectly alive, reported as one that needs `jiku login`.
+func (d *DeviceFlow) refreshShared(ctx context.Context) error {
+	if l, ok := d.cfg.Store.(refreshLocker); ok {
+		unlock, err := l.lockRefresh(ctx)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+	}
+	if d.cfg.Store != nil {
+		if stored, err := d.cfg.Store.Load(); err == nil && stored.RefreshToken != "" &&
+			stored.RefreshToken != d.tokens.RefreshToken {
+			d.tokens = stored
+			if stored.Valid() {
+				return nil
+			}
+		}
+	}
+	return d.refresh(ctx)
+}
+
 // refresh renews the access token. Zitadel ROTATES the refresh token on every use, so the new
 // one is kept; when a response carries none, the previous one is preserved rather than dropped.
+//
+// Rotation is strict: Zitadel keeps only the latest refresh token id per OIDC session and
+// answers any earlier one as invalid (it does not revoke the session for the replay, so the
+// latest token keeps working). That is why refreshShared re-reads the store under a lock.
 func (d *DeviceFlow) refresh(ctx context.Context) error {
 	disc, err := Discover(ctx, d.cfg.HTTPClient, d.cfg.Issuer)
 	if err != nil {

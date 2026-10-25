@@ -124,6 +124,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Two processes sharing a login could log each other out.** Zitadel rotates the refresh token
+  on every use and refuses the previous one (it keeps only the latest per session). When the
+  sync daemon and a `jiku` run by hand both found the access token expired, both refreshed with
+  the same refresh token, and the loser got `invalid_grant` — reported as "run `jiku login`" for
+  a session that was alive. `FileStore` now serialises refreshes across processes with a lock
+  file beside the tokens (`tokens-<instance>.json.lock`), and a refresh re-reads the file first,
+  adopting what another process just saved.
 - **Every plane but core's commands got core's read-plane identity list.** The rule was "the
   command plane refuses `actor`, everything else refuses eleven names", which was right only
   while core's two services were the only ones. A module validates its own payloads, and its
