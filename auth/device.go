@@ -366,7 +366,7 @@ func (d *DeviceFlow) refresh(ctx context.Context) error {
 	})
 	if err != nil {
 		var te *tokenError
-		if errors.As(err, &te) && (te.Code == "invalid_grant" || te.Code == "invalid_token") {
+		if errors.As(err, &te) && refreshRejected(te) {
 			return fmt.Errorf("%w: the refresh token was rejected (%s)", ErrLoginRequired, te.Code)
 		}
 		return err
@@ -379,6 +379,21 @@ func (d *DeviceFlow) refresh(ctx context.Context) error {
 		return d.cfg.Store.Save(tokens)
 	}
 	return nil
+}
+
+// refreshRejected tells a refresh token Zitadel refuses — which only a new login fixes — from a
+// failure worth retrying. invalid_grant is the standard answer (an expired, revoked or rotated-out
+// token). Zitadel also answers invalid_request, "Errors.User.RefreshToken.Invalid", for a token it
+// cannot decrypt or parse: observed against a real instance with a corrupted token file. A plain
+// invalid_request without that message stays an ordinary error.
+func refreshRejected(te *tokenError) bool {
+	switch te.Code {
+	case "invalid_grant", "invalid_token":
+		return true
+	case "invalid_request":
+		return strings.Contains(te.Description, "RefreshToken")
+	}
+	return false
 }
 
 // load reads the store once, lazily. A store that holds nothing is not an error: it just means

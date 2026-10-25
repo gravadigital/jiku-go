@@ -174,6 +174,10 @@ All notable changes to this project are documented here. The format follows
   a session that was alive. `FileStore` now serialises refreshes across processes with a lock
   file beside the tokens (`tokens-<instance>.json.lock`), and a refresh re-reads the file first,
   adopting what another process just saved.
+- **A refresh token Zitadel cannot read was retried as if Zitadel were down.** Zitadel answers a
+  corrupted or foreign refresh token with `invalid_request` ("Errors.User.RefreshToken.Invalid"),
+  not `invalid_grant`. That answer now means `ErrLoginRequired` too, so `jiku docs sync` exits 77
+  instead of retrying forever.
 - **Every plane but core's commands got core's read-plane identity list.** The rule was "the
   command plane refuses `actor`, everything else refuses eleven names", which was right only
   while core's two services were the only ones. A module validates its own payloads, and its

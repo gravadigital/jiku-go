@@ -898,3 +898,22 @@ func TestConcurrentRefreshesSpendTheRefreshTokenOnce(t *testing.T) {
 		t.Errorf("the file holds %q, Zitadel's current refresh token is %q", got.RefreshToken, ri.current)
 	}
 }
+
+// TestRefreshRejectionsNeedALogin: what Zitadel answers for a refresh token it will never
+// accept must become ErrLoginRequired — the sync daemon exits 77 on it instead of retrying
+// forever — and nothing else may.
+func TestRefreshRejectionsNeedALogin(t *testing.T) {
+	for _, c := range []struct {
+		te   tokenError
+		want bool
+	}{
+		{tokenError{Code: "invalid_grant"}, true},
+		{tokenError{Code: "invalid_request", Description: "Errors.User.RefreshToken.Invalid"}, true},
+		{tokenError{Code: "invalid_request", Description: "grant_type missing"}, false},
+		{tokenError{Code: "server_error"}, false},
+	} {
+		if got := refreshRejected(&c.te); got != c.want {
+			t.Errorf("%+v: %v, want %v", c.te, got, c.want)
+		}
+	}
+}
