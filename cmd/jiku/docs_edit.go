@@ -49,7 +49,7 @@ whose path is printed, so nothing typed is lost.`,
 		},
 	}
 	cmd.Flags().IntVar(&ttl, "ttl", 120, "seconds the lock lasts between renewals")
-	cmd.Flags().StringVar(&message, "message", "", "what changed, for the history")
+	cmd.Flags().StringVar(&message, "message", "", "what changed, for the history; also keeps this version forever")
 	return cmd
 }
 

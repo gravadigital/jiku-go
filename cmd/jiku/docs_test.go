@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -254,5 +255,71 @@ func TestGetSaysTheDocumentIsDeleted(t *testing.T) {
 	b, _ := io.ReadAll(r)
 	if !strings.Contains(string(b), "DELETED at 2026-10-25T01:25:17Z") {
 		t.Fatalf("stderr: %q", b)
+	}
+}
+
+// TestDocsErrorReportsAPrunedVersion: a version that history compaction removed names the
+// nearest versions kept, on stderr with the error, and exits with its own status. An external
+// user is told document_not_found for the same request, and that stays an ordinary failure.
+func TestDocsErrorReportsAPrunedVersion(t *testing.T) {
+	pruned := &jiku.Error{Code: docs.CodeVersionPruned, Details: &jiku.ErrorDetails{}}
+	if err := json.Unmarshal([]byte(`{"requestedVersion":12,"previousAvailable":9,"nextAvailable":15}`), pruned.Details); err != nil {
+		t.Fatal(err)
+	}
+	err := docsError(pruned)
+	var coded exitError
+	if !errors.As(err, &coded) || coded.code != exitVersionPruned {
+		t.Fatalf("exit status: %v", err)
+	}
+	for _, want := range []string{"12", "9", "15", "history"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("%q does not mention %s", err, want)
+		}
+	}
+	if !jiku.IsCode(err, docs.CodeVersionPruned) {
+		t.Error("the code was lost")
+	}
+	external := docsError(&jiku.Error{Code: docs.CodeDocumentNotFound})
+	if errors.As(external, &coded) {
+		t.Errorf("document_not_found exits %d", coded.code)
+	}
+}
+
+// TestHistoryMarksProtectedVersions: JSON keeps the module's fields, kind and protected
+// included; a table marks protected versions with *. The closing line appears only when the
+// module counted.
+func TestHistoryMarksProtectedVersions(t *testing.T) {
+	saved := g.output
+	defer func() { g.output = saved }()
+	versions := []docs.Version{
+		{Version: 40, Kind: docs.VersionUpdate, Protected: true, Message: "Enviada"},
+		{Version: 31, Kind: docs.VersionUpdate},
+	}
+
+	g.output = "json"
+	var out strings.Builder
+	if err := emitTo(&out, historyView(versions), nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"kind": "update"`) || !strings.Contains(out.String(), `"protected": false`) {
+		t.Fatalf("json:\n%s", out.String())
+	}
+
+	g.output = "table"
+	out.Reset()
+	if err := emitTo(&out, historyView(versions), nil); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 4 || !strings.Contains(lines[0], "kind") || !strings.Contains(lines[2], "*") || strings.Contains(lines[3], "*") {
+		t.Fatalf("table:\n%s", out.String())
+	}
+
+	n := 36
+	if got := prunedLine(&n); !strings.HasPrefix(got, "36 version(s) compacted") {
+		t.Errorf("%q", got)
+	}
+	if got := prunedLine(nil); got != "" {
+		t.Errorf("an uncounted history claimed %q", got)
 	}
 }

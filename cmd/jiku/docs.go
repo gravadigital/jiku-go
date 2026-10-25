@@ -25,6 +25,10 @@ import (
 const (
 	exitModuleAbsent = 3 // not installed, or a protocol this client does not speak
 	exitModuleDown   = 4 // installed and not answering
+	// exitVersionPruned is an earlier version that history compaction removed. It is not a
+	// failure to reach the module, but a script asking for old versions in a loop needs to tell
+	// "gone for good, try a neighbour" from every other refusal without parsing text.
+	exitVersionPruned = 5
 )
 
 func newDocsCmd() *cobra.Command {
@@ -51,7 +55,9 @@ a presigned upload, and ` + "`via`" + ` is sent from $` + docs.EnvVia + ` ("agen
 FOR AGENTS. Search before creating, so nothing is duplicated. Cite the document and its version
 when answering from it. Save only what the person accepted. Never run ` + "`share`" + ` or ` + "`revoke`" + `
 without the person's explicit confirmation: the CLI cannot impose that gate. Set
-` + docs.EnvVia + `=agent so the history says who wrote what. See docs/agents.md.`,
+` + docs.EnvVia + `=agent so the history says who wrote what. At the end of a piece of work, save
+with --message: that version is kept forever, while an agent's saves without one are compacted.
+See docs/agents.md.`,
 	}
 	cmd.AddCommand(
 		newDocsStatusCmd(),
@@ -128,7 +134,10 @@ func docsError(err error) error {
 		return exitError{code: exitModuleDown, error: err}
 	}
 	if h := docs.Hint(err); h != "" {
-		return fmt.Errorf("%w\n  %s", err, h)
+		err = fmt.Errorf("%w\n  %s", err, h)
+	}
+	if jiku.IsCode(err, docs.CodeVersionPruned) {
+		return exitError{code: exitVersionPruned, error: err}
 	}
 	return err
 }
@@ -671,7 +680,10 @@ stderr — so ` + "`jiku docs get X > file.md`" + ` gives a clean file and the v
   jiku docs get 01JBX7Q2M4N8P6R3T5V9W1Y0ZA --version 3
   jiku docs get /infra/servidores/staging.md -o json     # metadata and content together
 
-A lock held by somebody else is reported: edit read-only, or wait for it.`,
+A lock held by somebody else is reported: edit read-only, or wait for it.
+
+The module compacts old history, so an earlier version may be gone: then get prints the nearest
+versions kept on stderr and exits 5. ` + "`jiku docs history`" + ` lists the versions kept.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signalContext()
@@ -737,7 +749,12 @@ re-read, merge, and retry with the new base.
   JIKU_VIA=agent jiku docs put 01JBX... staging.md --base-version 7 --session 01JD...
 
 Saving content identical to the current version succeeds without a new version, so retrying
-after a timeout is safe.`,
+after a timeout is safe.
+
+--message also PROTECTS the version: history compaction never removes it. Versions saved without
+one, by a person or by an agent, are compacted by editing session — after a day only the last of
+each session is kept, after 30 days the last of each day. Save with --message at a point worth
+returning to ("Versión enviada al cliente"), and at the end of an agent's piece of work.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signalContext()
@@ -762,7 +779,7 @@ after a timeout is safe.`,
 	}
 	cmd.Flags().IntVar(&base, "base-version", 0, "the version this content was made from (required)")
 	cmd.Flags().StringVar(&session, "session", "", "the edit session holding the lock, if any")
-	cmd.Flags().StringVar(&message, "message", "", "what changed, for the history")
+	cmd.Flags().StringVar(&message, "message", "", "what changed, for the history; also keeps this version forever")
 	_ = cmd.MarkFlagRequired("base-version")
 	return cmd
 }
@@ -920,7 +937,10 @@ func newDocsRestoreCmd() *cobra.Command {
 		Long: `Creates a new version with the content of --from-version. History is never rewritten.
 On a deleted document it also reactivates it; a deleted document is found by its path too.
 
-  jiku docs restore /infra/a.md --from-version 3 --base-version 7`,
+  jiku docs restore /infra/a.md --from-version 3 --base-version 7
+
+A --from-version that history compaction removed restores nothing: the nearest versions kept are
+printed on stderr and the command exits 5. Pick one of them, or see ` + "`jiku docs history`" + `.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signalContext()
@@ -950,10 +970,22 @@ On a deleted document it also reactivates it; a deleted document is found by its
 }
 
 func newDocsHistoryCmd() *cobra.Command {
-	return &cobra.Command{
+	var protected bool
+	cmd := &cobra.Command{
 		Use:   "history <document>",
 		Short: "List a document's versions, newest first",
-		Args:  cobra.ExactArgs(1),
+		Long: `Lists the versions the module keeps, newest first, with their kind (create, update,
+restore) and whether they are protected. A last line on stderr says how many were compacted.
+
+The module compacts old history: after a day it keeps the last version of each editing session
+(one author, one via, no pause of 30 minutes), after 30 days the last of each day. Protected
+versions are never removed: the first and the current one, any saved with --message, any written
+by a service, every restore, and any a live pinned link shows. So the numbers can have gaps, and
+asking for a version that was compacted exits 5 naming the nearest versions kept.
+
+  jiku docs history /infra/servidores/staging.md -o table    # protected versions marked *
+  jiku docs history /infra/servidores/staging.md --protected  # only the ones kept forever`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signalContext()
 			defer cancel()
@@ -962,17 +994,74 @@ func newDocsHistoryCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				versions, err := d.Versions(ctx, id)
+				versions, err := d.ListVersions(ctx, id, docs.VersionsOptions{ProtectedOnly: protected})
+				if protected && jiku.IsCode(err, docs.CodeInvalidFields) {
+					return fmt.Errorf("%v\n  this module does not filter on protected: it predates "+
+						"history compaction and keeps every version. Drop --protected", err)
+				}
 				if err != nil {
 					return err
 				}
-				if versions == nil {
-					versions = []docs.Version{}
+				// The count is the document's, not the history's: a second request, and a
+				// failed one only costs the summary line, never the list already in hand.
+				var pruned *int
+				if doc, err := d.GetDocument(ctx, id, docs.GetOptions{}); err == nil {
+					pruned = doc.PrunedVersionsCount
 				}
-				return emit(os.Stdout, versions, nil)
+				if err := emit(os.Stdout, historyView(versions), nil); err != nil {
+					return err
+				}
+				if line := prunedLine(pruned); line != "" {
+					progressf("%s\n", line)
+				}
+				return nil
 			})
 		},
 	}
+	cmd.Flags().BoolVar(&protected, "protected", false, "only the versions compaction never removes")
+	return cmd
+}
+
+// historyRow is a version as `history -o table` shows it: protection as a mark a person finds
+// at a glance, rather than a column of true and false.
+type historyRow struct {
+	Version   int              `json:"version"`
+	Kind      docs.VersionKind `json:"kind"`
+	Protected string           `json:"protected"`
+	CreatedAt *time.Time       `json:"createdAt,omitempty"`
+	Author    string           `json:"author"`
+	Via       docs.Via         `json:"via"`
+	Message   string           `json:"message"`
+}
+
+// historyView is what `history` emits: the versions as the module described them, or, for a
+// table, one row each with protected versions marked *.
+func historyView(versions []docs.Version) any {
+	if g.output != "table" {
+		if versions == nil {
+			return []docs.Version{}
+		}
+		return versions
+	}
+	rows := make([]historyRow, 0, len(versions))
+	for _, v := range versions {
+		mark := ""
+		if v.Protected {
+			mark = "*"
+		}
+		rows = append(rows, historyRow{Version: v.Version, Kind: v.Kind, Protected: mark,
+			CreatedAt: v.CreatedAt, Author: v.Author, Via: v.Via, Message: v.Message})
+	}
+	return rows
+}
+
+// prunedLine closes `history`. Nothing when the module did not say, as one without compaction
+// does not: zero would claim something it never counted.
+func prunedLine(pruned *int) string {
+	if pruned == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d version(s) compacted; versions saved with --message are never compacted", *pruned)
 }
 
 // ---- lock, unlock ----------------------------------------------------------
