@@ -72,6 +72,12 @@ jobs:
       - name: make dist
         run: make dist
 
+      # The .deb and .rpm (GoReleaser through nfpm, see .goreleaser.yaml) join the binaries in
+      # dist/, and SHA256SUMS.txt is recomputed over all of them. GoReleaser publishes
+      # nothing itself: the release below uploads dist/* as before.
+      - name: make packages
+        run: make packages
+
       # Proves the shipped binary runs and knows which version it is. Without this, a bad
       # ldflags change is discovered by whoever downloads it first.
       - name: Smoke-test the built binary
@@ -103,6 +109,11 @@ jobs:
             # Library
             go get github.com/gravadigital/jiku-go@${{ github.ref_name }}
             ```
+
+            On Debian or Ubuntu, `sudo apt install ./jiku_<version>_amd64.deb`; on Fedora,
+            `sudo dnf install ./jiku_<version>_amd64.rpm`. The package installs `/usr/bin/jiku`
+            and the `jiku-docs-sync` systemd user service, which it does not enable: run
+            `jiku login`, then `systemctl --user enable --now jiku-docs-sync`.
 
             Or download a binary below and put it on your `PATH`. Verify it against
             `SHA256SUMS.txt`:

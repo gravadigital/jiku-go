@@ -1,0 +1,27 @@
+# jiku docs sync — example configuration.
+#
+# Copy it to ~/.config/jiku/docs-sync.yaml and keep only what you change: every key is
+# optional. Precedence: flags, then JIKU_DOCS_SYNC_<KEY> variables, then this file.
+# An unknown key or an invalid value stops the service with status 78 and names the line.
+# After a change: systemctl --user restart jiku-docs-sync
+
+# Local folder where the documents are mirrored.
+root: ~/JikuDocs
+
+# Module folders to sync. Empty: everything you can read.
+include: []
+#  - /clientes/acme/
+#  - /infra/
+
+# Folders taken out of what include selects.
+exclude: []
+#  - /clientes/acme/archivo/
+
+# How long a file must stay unchanged before it is uploaded.
+debounce: 2s
+
+# Desktop notifications (conflicts, files not uploaded, module down or uninstalled).
+notifications: true
+
+# debug | info | warn | error
+log_level: info

@@ -1,0 +1,36 @@
+# jiku docs sync as a systemd USER service. Installed by the jiku package; enabled by each
+# person, after `jiku login`:
+#
+#     systemctl --user enable --now jiku-docs-sync
+#
+# Configuration lives in ~/.config/jiku/docs-sync.yaml, never here, so this file is the same
+# for everybody. Adjust it with a drop-in (`systemctl --user edit jiku-docs-sync`), not by
+# editing it: an upgrade replaces it.
+
+[Unit]
+Description=Sincronización de jiku docs
+Documentation=https://github.com/gravadigital/jiku-go/blob/main/docs/docs-module.md
+# Five failures in five minutes and systemd stops trying: the unit is left `failed`.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+# READY=1 comes once the configuration is loaded, the lock taken and the folder watched; the
+# connection and the reconciliation are reported in STATUS=.
+Type=notify
+ExecStart=/usr/bin/jiku docs sync
+Restart=on-failure
+RestartSec=10
+# 77: the login was refused (run `jiku login`). 78: the configuration is invalid. Restarting
+# fixes neither.
+RestartPreventExitStatus=77 78
+WatchdogSec=60
+# Time to upload the edits still waiting when the service is stopped.
+TimeoutStopSec=30
+# Filesystem isolation (ProtectSystem=, ReadWritePaths=) is deliberately absent: in a user
+# service on Ubuntu 26.04 / systemd 259 it is silently ignored, and an isolation that only
+# looks applied is worse than none.
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,76 @@
+# GoReleaser builds the Linux PACKAGES (.deb and .rpm, through nfpm) and nothing else.
+#
+# The plain binaries for five platforms, their checksums and the GitHub release are still
+# `make dist` and the release workflow, unchanged: this file adds two artifacts to that
+# release rather than taking it over. Run it through `make packages`, which gathers the
+# packages into ./dist beside the binaries and recomputes SHA256SUMS.txt over all of them.
+#
+#     make packages SNAPSHOT=1      # local check, no tag needed
+version: 2
+
+project_name: jiku
+
+# Under ./dist, so `make clean` covers it, but in its own folder: --clean wipes it, and it
+# must not wipe the binaries `make dist` left beside it.
+dist: dist/pkg
+
+builds:
+  - id: jiku
+    main: ./cmd/jiku
+    binary: jiku
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    # .Tag keeps the leading v, as `git describe` does for `make build`: `jiku --version`
+    # prints the same thing however it was built.
+    ldflags:
+      - -s -w -X main.version={{ .Tag }}
+
+archives:
+  - formats: [binary]
+    name_template: "{{ .Binary }}-{{ .Os }}-{{ .Arch }}"
+
+checksum:
+  disable: true
+
+release:
+  disable: true
+
+changelog:
+  disable: true
+
+nfpms:
+  - id: jiku
+    package_name: jiku
+    file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Arch }}"
+    vendor: Grava
+    homepage: https://github.com/gravadigital/jiku-go
+    maintainer: Grava <noreply@grava.digital>
+    description: |-
+      Command-line client for Jiku's NATS API, with the jiku docs sync daemon.
+      The daemon ships as a systemd user service that each person enables
+      after `jiku login`: systemctl --user enable --now jiku-docs-sync
+    license: Apache-2.0
+    section: utils
+    formats: [deb, rpm]
+    bindir: /usr/bin
+    contents:
+      # A user unit lives in /usr/lib/systemd/user on Debian and Fedora alike. It is not a
+      # conffile: local changes go in a drop-in, which survives upgrades.
+      - src: packaging/systemd/jiku-docs-sync.service
+        dst: /usr/lib/systemd/user/jiku-docs-sync.service
+        file_info:
+          mode: 0644
+      - src: packaging/docs-sync.example.yaml
+        dst: /usr/share/doc/jiku/docs-sync.example.yaml
+        file_info:
+          mode: 0644
+      - src: LICENSE
+        dst: /usr/share/doc/jiku/LICENSE
+        file_info:
+          mode: 0644
+    # Only a message: the package never enables, starts or restarts a user service.
+    scripts:
+      postinstall: packaging/scripts/postinstall.sh

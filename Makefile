@@ -138,6 +138,20 @@ tag: ## Check and create a release tag: make tag VERSION=v1.2.3
 	@echo
 	@echo "That push is irreversible: the module proxy caches the tag permanently."
 
+# The Linux packages, .deb and .rpm, built by GoReleaser through nfpm (.goreleaser.yaml). Pinned
+# like any other dependency and run with `go run`, so neither CI nor a laptop needs it installed.
+# Run after `make dist`: the packages join the binaries in ./dist and SHA256SUMS.txt is
+# recomputed over all of them. SNAPSHOT=1 builds without a tag, for a local check.
+GORELEASER ?= go run github.com/goreleaser/goreleaser/v2@v2.18.3
+
+.PHONY: packages
+packages: ## Build the .deb and .rpm into ./dist (after make dist; SNAPSHOT=1 without a tag)
+	@mkdir -p dist
+	$(GORELEASER) release --clean $(if $(SNAPSHOT),--snapshot,--skip=publish)
+	cp dist/pkg/*.deb dist/pkg/*.rpm dist/
+	rm -rf dist/pkg
+	@cd dist && rm -f SHA256SUMS.txt && sha256sum * > SHA256SUMS.txt && echo "  dist/SHA256SUMS.txt"
+
 .PHONY: clean
 clean: ## Remove build output
 	rm -rf bin dist coverage.out

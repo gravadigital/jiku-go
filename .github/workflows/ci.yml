@@ -49,6 +49,14 @@ jobs:
       - name: make build
         run: make build
 
+      # The .deb and .rpm, as a snapshot: a packaging mistake should not wait for a tag either.
+      # The unit file is checked to be where the user manager looks for it.
+      - name: make packages (snapshot)
+        run: |
+          make dist packages SNAPSHOT=1
+          dpkg-deb -c dist/jiku_*_amd64.deb | tee /dev/stderr \
+            | grep -q '/usr/lib/systemd/user/jiku-docs-sync.service'
+
   vulncheck:
     name: govulncheck
     runs-on: ubuntu-latest
