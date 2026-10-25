@@ -95,10 +95,13 @@ func (f *fakeRemote) Get(_ context.Context, id string) (RemoteDoc, []byte, error
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	d, ok := f.docs[id]
-	if !ok || d.deleted {
+	if !ok {
 		return RemoteDoc{}, nil, &jiku.Error{Code: docs.CodeDocumentNotFound}
 	}
-	return d.RemoteDoc, append([]byte(nil), d.content...), nil
+	// Like the module: a deleted document is still answered by id (it can be restored), marked.
+	rd := d.RemoteDoc
+	rd.Deleted = d.deleted
+	return rd, append([]byte(nil), d.content...), nil
 }
 
 func (f *fakeRemote) Update(_ context.Context, id string, base int, content []byte) (int, error) {
@@ -510,6 +513,21 @@ func TestAReplayedDeletionOfARestoredDocumentIsIgnored(t *testing.T) {
 	}
 	if rec := h.rec(docB); rec == nil || rec.Version != 2 {
 		t.Fatalf("record after the replay: %+v", rec)
+	}
+}
+
+// TestADeletedDocumentIsNeverDownloaded: the module answers documents.get for a deleted document
+// too, so it can be restored. Replaying the feed's document.created of a document deleted since
+// downloaded it, and the next entry removed it again.
+func TestADeletedDocumentIsNeverDownloaded(t *testing.T) {
+	h := newHarness(t)
+	h.remote.put(docB, "/infra/b.md", fInfra, "# B\n", 1)
+	h.remote.mu.Lock()
+	h.remote.docs[docB].deleted = true
+	h.remote.mu.Unlock()
+	h.once()
+	if h.exists("/infra/b.md") || h.rec(docB) != nil || strings.Contains(h.log.String(), "b.md") {
+		t.Fatalf("a deleted document was synced:\n%s", h.log)
 	}
 }
 

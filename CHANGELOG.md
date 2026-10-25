@@ -132,6 +132,10 @@ All notable changes to this project are documented here. The format follows
   included. The file of a restored document was removed and downloaded again, and one with local
   edits was moved to `.jiku-docs/sin-acceso/`. A deletion older than the version already held is
   now skipped.
+- **`jiku docs sync` downloaded deleted documents.** The module answers `documents.get` for a
+  deleted document (so it can be restored), and a replayed `document.created` of one deleted
+  since fetched it into the folder until the next entry removed it. A deleted document is now
+  treated as gone.
 - **`jiku docs query attachments.list` said "0 item(s), limit 0" above its items.** A list that
   answers without a page object now reports how many items it carries.
 - **`jiku docs ls /` answered "not found" to everyone but admins**, whom alone the root grants

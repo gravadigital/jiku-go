@@ -17,6 +17,8 @@ type RemoteDoc struct {
 	FolderID string
 	Version  int
 	Checksum string
+	// Deleted is set by Get for a deleted document, which the module still answers by id.
+	Deleted bool
 }
 
 // RemoteFolder is a folder with the permission the person has on it.
@@ -33,7 +35,8 @@ type Remote interface {
 	ListDocuments(ctx context.Context, pathPrefix string) ([]RemoteDoc, error)
 	// Folders returns every readable folder under pathPrefix, with the effective permission.
 	Folders(ctx context.Context, pathPrefix string) ([]RemoteFolder, error)
-	// Get returns a document's current metadata and content.
+	// Get returns a document's current metadata and content. A deleted document comes back too,
+	// with Deleted set, as the module answers it.
 	Get(ctx context.Context, id string) (RemoteDoc, []byte, error)
 	// Update saves content over baseVersion and returns the new version.
 	Update(ctx context.Context, id string, baseVersion int, content []byte) (int, error)
@@ -126,7 +129,8 @@ func (r remote) Get(ctx context.Context, id string) (RemoteDoc, []byte, error) {
 	if err != nil {
 		return RemoteDoc{}, nil, err
 	}
-	return RemoteDoc{ID: d.ID, Path: d.Path, FolderID: d.FolderID, Version: d.Version, Checksum: d.Checksum}, content, nil
+	return RemoteDoc{ID: d.ID, Path: d.Path, FolderID: d.FolderID, Version: d.Version, Checksum: d.Checksum,
+		Deleted: d.DeletedAt != nil}, content, nil
 }
 
 func (r remote) Update(ctx context.Context, id string, baseVersion int, content []byte) (int, error) {

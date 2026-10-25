@@ -549,6 +549,13 @@ func (e *Engine) fetch(ctx context.Context, r Remote, id string, rec *DocRecord)
 		}
 		return err
 	}
+	if d.Deleted {
+		// Asked about because of an older entry of the feed; it is gone now.
+		if rec != nil {
+			return e.remoteDeleted(id, 0)
+		}
+		return nil
+	}
 	if !e.inScope(d.Path) {
 		if rec != nil {
 			e.noLongerReadable(*rec, "moved out of the synced folders")
