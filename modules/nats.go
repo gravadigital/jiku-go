@@ -144,32 +144,81 @@ func translate(ctx context.Context, module string, updates <-chan jetstream.KeyV
 }
 
 func (b *natsBackend) ping(ctx context.Context, service string) (time.Duration, error) {
+	return pingOver(ctx, b.nc, "$SRV.PING."+service)
+}
+
+// pingConn is what a ping needs of a connection; *nats.Conn is one.
+type pingConn interface {
+	RequestWithContext(ctx context.Context, subject string, data []byte) (*nats.Msg, error)
+	LastError() error
+}
+
+// refusalPoll is how often a ping in flight looks for its own refusal. The server sends the
+// refusal back within a round trip, so this bounds how late it is noticed.
+const refusalPoll = 5 * time.Millisecond
+
+// pingOver pings subject and tells a refused ping apart as soon as the refusal arrives.
+//
+// The server drops a refused publish and answers the connection with an -ERR, which nats.go
+// records as its last error: the request itself only times out. Waiting for that timeout made
+// every identity without the ping grant — Jiku's person templates, by design — pay the whole
+// ping timeout on every command. So the request runs while the connection's last error is
+// watched, and a refusal naming this subject that was not already there ends the wait.
+func pingOver(ctx context.Context, nc pingConn, subject string) (time.Duration, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, DefaultPingTimeout)
 		defer cancel()
 	}
-	subject := "$SRV.PING." + service
+	reqCtx, cancelReq := context.WithCancel(ctx)
+	defer cancelReq()
+	before := nc.LastError()
+	type result struct {
+		rtt time.Duration
+		err error
+	}
+	done := make(chan result, 1)
 	start := time.Now()
-	_, err := b.nc.RequestWithContext(ctx, subject, nil)
-	rtt := time.Since(start)
+	go func() {
+		_, err := nc.RequestWithContext(reqCtx, subject, nil)
+		done <- result{time.Since(start), err}
+	}()
+	refused := func() error {
+		if last := nc.LastError(); last != nil && last != before {
+			return violation(nc, subject)
+		}
+		return nil
+	}
+	tick := time.NewTicker(refusalPoll)
+	defer tick.Stop()
+	var r result
+wait:
+	for {
+		select {
+		case r = <-done:
+			break wait
+		case <-tick.C:
+			if perm := refused(); perm != nil {
+				return 0, permissionError(perm, subject, "pinging "+strings.TrimPrefix(subject, "$SRV.PING."))
+			}
+		}
+	}
 	switch {
-	case err == nil:
-		return rtt, nil
-	case errors.Is(err, nats.ErrNoResponders):
+	case r.err == nil:
+		return r.rtt, nil
+	case errors.Is(r.err, nats.ErrNoResponders):
 		// The server said at once that nothing is subscribed: the module is down.
 		return 0, fmt.Errorf("%w: nothing is subscribed to %s", ErrUnavailable, subject)
 	}
 	// A timeout is either a module too busy to answer a ping — down, for every practical
-	// purpose — or a refused publish, which the server drops in silence. Only the second has
-	// a fix the caller can apply, so it is looked for before concluding the first.
-	if perm := b.violation(subject); perm != nil {
-		return 0, b.permissionError(perm, subject, "pinging "+service)
+	// purpose — or a refused publish whose refusal arrived after the last look.
+	if perm := refused(); perm != nil {
+		return 0, permissionError(perm, subject, "pinging "+strings.TrimPrefix(subject, "$SRV.PING."))
 	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, nats.ErrTimeout) {
+	if errors.Is(r.err, context.DeadlineExceeded) || errors.Is(r.err, nats.ErrTimeout) {
 		return 0, fmt.Errorf("%w: %s got no reply within the ping timeout", ErrUnavailable, subject)
 	}
-	return 0, fmt.Errorf("modules: pinging %s: %w", service, err)
+	return 0, fmt.Errorf("modules: pinging %s: %w", subject, r.err)
 }
 
 // violation returns the connection's last error when it is a permissions violation naming
@@ -180,8 +229,10 @@ func (b *natsBackend) ping(ctx context.Context, service string) (time.Duration, 
 // concurrent callers would otherwise overwrite. The match is on the quoted subject and nothing
 // looser: a stale refusal of another registry subject — the consumer delete that stopping a
 // watch sends, say — must not turn a module that is down into a permissions problem.
-func (b *natsBackend) violation(subject string) error {
-	err := b.nc.LastError()
+func (b *natsBackend) violation(subject string) error { return violation(b.nc, subject) }
+
+func violation(nc interface{ LastError() error }, subject string) error {
+	err := nc.LastError()
 	if err == nil {
 		return nil
 	}
@@ -222,6 +273,10 @@ func (b *natsBackend) explain(err error, subject, op string) error {
 }
 
 func (b *natsBackend) permissionError(perm error, subject, op string) error {
+	return permissionError(perm, subject, op)
+}
+
+func permissionError(perm error, subject, op string) error {
 	service := ""
 	if strings.HasPrefix(subject, "$SRV.PING.") {
 		service = strings.TrimSuffix(strings.TrimPrefix(subject, "$SRV.PING."), "-queries")

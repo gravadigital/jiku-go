@@ -121,6 +121,10 @@ All notable changes to this project are documented here. The format follows
   that is down answers exactly like a missing method.
 - **`jiku raw --service` accepted only core's two services**, although its purpose is reaching
   what nothing else models. It takes any valid service name now, such as `jiku-docs-queries`.
+- **Every `jiku docs` command by a person took three seconds longer than its request.** Jiku's
+  person templates do not grant the module's ping, and the refused ping was only recognised once
+  the whole ping timeout had passed. The refusal is now noticed as soon as the server reports
+  it, within a round trip; a refusal left on the connection by an earlier ping does not count.
 
 ### Changed
 
