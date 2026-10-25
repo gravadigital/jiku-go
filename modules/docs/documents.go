@@ -51,7 +51,8 @@ func requireID(what, id string) error {
 
 // GetOptions selects what GetDocument returns.
 type GetOptions struct {
-	// Version asks for an earlier version. Zero is the current one.
+	// Version asks for an earlier version. Zero is the current one. One that history
+	// compaction removed is CodeVersionPruned; PrunedVersion names the nearest versions kept.
 	Version int
 	// Include adds includables: content, relations, topics, lock, attachments.
 	Include []string
@@ -353,7 +354,8 @@ func (c *Client) Delete(ctx context.Context, id string, baseVersion int) error {
 }
 
 // Restore creates a new version with the content of fromVersion, reactivating a deleted
-// document. History is never rewritten.
+// document. History is never rewritten. A fromVersion that history compaction removed is
+// CodeVersionPruned; PrunedVersion names the nearest versions kept.
 func (c *Client) Restore(ctx context.Context, id string, fromVersion, baseVersion int) (*WriteResult, error) {
 	if err := requireID("document", id); err != nil {
 		return nil, err
@@ -371,13 +373,32 @@ func (c *Client) Restore(ctx context.Context, id string, fromVersion, baseVersio
 
 // Versions returns a document's whole history, newest first.
 func (c *Client) Versions(ctx context.Context, id string) ([]Version, error) {
+	return c.ListVersions(ctx, id, VersionsOptions{})
+}
+
+// VersionsOptions narrow a document's history.
+type VersionsOptions struct {
+	// ProtectedOnly keeps the versions history compaction never removes. A module without
+	// compaction does not know the filter and answers invalid_fields.
+	ProtectedOnly bool
+	// Kind keeps one kind of version. Empty is every kind.
+	Kind VersionKind
+}
+
+// ListVersions returns a document's history, newest first, every page, filtered by the module.
+func (c *Client) ListVersions(ctx context.Context, id string, opts VersionsOptions) ([]Version, error) {
 	if err := requireID("document", id); err != nil {
 		return nil, err
 	}
+	filter := jiku.F{"documentId": id}
+	if opts.ProtectedOnly {
+		filter["protected"] = true
+	}
+	if opts.Kind != "" {
+		filter["kind"] = string(opts.Kind)
+	}
 	var out []Version
-	it := c.Iterate(ctx, "documents.versions", jiku.List{
-		Filter: jiku.F{"documentId": id}, Sort: []string{"-version"},
-	})
+	it := c.Iterate(ctx, "documents.versions", jiku.List{Filter: filter, Sort: []string{"-version"}})
 	for it.Next() {
 		var v Version
 		if err := it.Item().Into(&v); err != nil {

@@ -26,6 +26,9 @@ type Document struct {
 	UpdatedAt  *time.Time `json:"updatedAt,omitempty"`
 	UpdatedBy  string     `json:"updatedBy,omitempty"`
 	DeletedAt  *time.Time `json:"deletedAt,omitempty"`
+	// PrunedVersionsCount is how many of the document's versions history compaction removed.
+	// Nil when the module did not say, as one without compaction does not.
+	PrunedVersionsCount *int `json:"prunedVersionsCount,omitempty"`
 	// Content is present with include "content" up to the inline limit. Above it the module
 	// sends ContentURL instead; GetContent follows it.
 	Content     *string      `json:"content,omitempty"`
@@ -80,9 +83,16 @@ type ACLRule struct {
 	Permission    string `json:"permission"`
 }
 
-// Version is one entry of a document's history.
+// Version is one entry of a document's history. The module compacts old history, so the
+// numbers can have gaps; see Protected.
 type Version struct {
-	Version   int        `json:"version"`
+	Version int `json:"version"`
+	// Kind is how the version came to be. Empty from a module that does not say.
+	Kind VersionKind `json:"kind,omitempty"`
+	// Protected is a version history compaction never removes: the first, the current, one
+	// saved with a message, one written by a service, a restore, or one a live pinned link
+	// shows. False from a module that does not say — one that does not compact either.
+	Protected bool       `json:"protected"`
 	Checksum  string     `json:"checksum,omitempty"`
 	SizeBytes int64      `json:"sizeBytes,omitempty"`
 	Author    string     `json:"author,omitempty"`
@@ -91,6 +101,15 @@ type Version struct {
 	Message   string     `json:"message,omitempty"`
 	CreatedAt *time.Time `json:"createdAt,omitempty"`
 }
+
+// VersionKind is how a version came to be.
+type VersionKind string
+
+const (
+	VersionCreate  VersionKind = "create"
+	VersionUpdate  VersionKind = "update"
+	VersionRestore VersionKind = "restore"
+)
 
 // SearchHit is one fragment found by a search.
 type SearchHit struct {

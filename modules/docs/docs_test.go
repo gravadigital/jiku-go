@@ -494,8 +494,9 @@ func TestDecodeNotification(t *testing.T) {
 // TestErrorCatalogMatchesTheModuleContract pins the constants against the module's catalog: the
 // union of every x-error-codes list and of the Failure examples in its command and query
 // contracts, which matches the catalog tables of its specification — 30 codes, extracted by
-// script on 2026-10-24, never transcribed by hand. Both directions are checked, so an invented
-// constant fails as loudly as a missing one.
+// script on 2026-10-24, never transcribed by hand — plus version_pruned, which the module's
+// history-compaction change adds to documents.get, documents.{id}.restore and shares.new. Both
+// directions are checked, so an invented constant fails as loudly as a missing one.
 func TestErrorCatalogMatchesTheModuleContract(t *testing.T) {
 	contract := []string{
 		"already_exists", "attachment_not_found", "attachment_too_large",
@@ -506,7 +507,7 @@ func TestErrorCatalogMatchesTheModuleContract(t *testing.T) {
 		"permission_denied", "query_timeout", "secret_warning_not_acknowledged",
 		"semantic_search_not_configured", "share_expiry_invalid", "share_not_found",
 		"sharing_blocked", "unknown_caller", "upload_not_found", "upstream_unavailable",
-		"version_conflict",
+		"version_conflict", "version_pruned",
 	}
 	mine := []string{
 		CodeInvalidFields, CodeInvalidCursor, CodeDocumentNotFound, CodeFolderNotFound,
@@ -517,10 +518,82 @@ func TestErrorCatalogMatchesTheModuleContract(t *testing.T) {
 		CodeQueryTimeout, CodeUnknownCaller, CodeCallerNotAuthorized, CodeUpstreamUnavailable,
 		CodeInternalError, CodeShareNotFound, CodeSharingBlocked, CodeShareExpiryInvalid,
 		CodeSecretWarningNotAcknowledged, CodeSemanticSearchNotConfigured,
-		CodeAttachmentsNotConfigured,
+		CodeAttachmentsNotConfigured, CodeVersionPruned,
 	}
 	sort.Strings(mine)
 	if strings.Join(mine, ",") != strings.Join(contract, ",") {
 		t.Fatalf("catalog drift:\n  contract %v\n  package  %v", contract, mine)
+	}
+}
+
+// TestVersionPruned: the nearest versions kept come back typed, with null read as "none on that
+// side", and the hint names them. An external user's document_not_found is not mistaken for it.
+func TestVersionPruned(t *testing.T) {
+	err := failure(CodeVersionPruned, `{"requestedVersion":12,"previousAvailable":9,"nextAvailable":null}`)
+	p, ok := PrunedVersion(err)
+	if !ok || p.RequestedVersion != 12 || p.PreviousAvailable == nil || *p.PreviousAvailable != 9 || p.NextAvailable != nil {
+		t.Fatalf("%+v %v", p, ok)
+	}
+	h := Hint(err)
+	for _, want := range []string{"12", "9", "no later", "history", "--message"} {
+		if !strings.Contains(h, want) {
+			t.Errorf("hint %q does not mention %s", h, want)
+		}
+	}
+	if _, ok := CurrentVersion(err); ok {
+		t.Error("a pruned version read as a conflict")
+	}
+	if _, ok := PrunedVersion(failure(CodeDocumentNotFound, "")); ok {
+		t.Error("document_not_found read as a pruned version")
+	}
+	if _, ok := PrunedVersion(failure(CodeVersionPruned, "")); ok {
+		t.Error("a reply without details invented a requested version")
+	}
+
+	b := newBus().fail("documents.get", err)
+	if _, _, got := newClient(b, nil).GetContent(context.Background(), docID, GetOptions{Version: 12}); !jiku.IsCode(got, CodeVersionPruned) {
+		t.Fatalf("%v", got)
+	}
+	b = newBus().fail("documents."+docID+".restore", err)
+	if _, got := newClient(b, nil).Restore(context.Background(), docID, 12, 20); !jiku.IsCode(got, CodeVersionPruned) {
+		t.Fatalf("%v", got)
+	}
+}
+
+// TestVersionsCarryCompaction: kind, protected and prunedVersionsCount are read when the module
+// sends them and left at their zero value — nil for the count — when an older one does not.
+func TestVersionsCarryCompaction(t *testing.T) {
+	b := newBus().on("documents.versions.list", `{"items":[
+		{"version":40,"kind":"update","protected":true,"message":"Enviada al cliente"},
+		{"version":31,"kind":"update","protected":false},
+		{"version":1,"kind":"create","protected":true}]}`)
+	c := newClient(b, nil)
+	vs, err := c.ListVersions(context.Background(), docID, VersionsOptions{ProtectedOnly: true})
+	if err != nil || len(vs) != 3 || vs[0].Kind != VersionUpdate || !vs[0].Protected || vs[1].Protected || vs[2].Kind != VersionCreate {
+		t.Fatalf("%+v %v", vs, err)
+	}
+	f := b.last("documents.versions.list").payload["filter"].(map[string]any)
+	if f["documentId"] != docID || f["protected"] != true {
+		t.Fatalf("filter %v", f)
+	}
+	b = newBus().on("documents.versions.list", `{"items":[{"version":2},{"version":1}]}`)
+	vs, err = newClient(b, nil).Versions(context.Background(), docID)
+	if err != nil || len(vs) != 2 || vs[0].Kind != "" || vs[0].Protected {
+		t.Fatalf("%+v %v", vs, err)
+	}
+	if _, ok := b.last("documents.versions.list").payload["filter"].(map[string]any)["protected"]; ok {
+		t.Fatal("Versions filters on protected; an older module would refuse it")
+	}
+
+	b = newBus().on("documents.get", `{"id":"`+docID+`","version":40,"prunedVersionsCount":36}`).
+		on("documents.get", `{"id":"`+docID+`","version":2}`)
+	c = newClient(b, nil)
+	doc, err := c.GetDocument(context.Background(), docID, GetOptions{})
+	if err != nil || doc.PrunedVersionsCount == nil || *doc.PrunedVersionsCount != 36 {
+		t.Fatalf("%+v %v", doc, err)
+	}
+	doc, err = c.GetDocument(context.Background(), docID, GetOptions{})
+	if err != nil || doc.PrunedVersionsCount != nil {
+		t.Fatalf("an older module's reply read as a count: %+v %v", doc, err)
 	}
 }

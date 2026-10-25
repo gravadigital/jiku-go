@@ -89,7 +89,8 @@ type ShareOptions struct {
 	// timeout returns the same link; later, already_exists.
 	ID         string
 	DocumentID string
-	// Pinned shows Version forever instead of the latest version.
+	// Pinned shows Version forever instead of the latest version. A Version that history
+	// compaction removed is CodeVersionPruned; while the link is live, compaction keeps it.
 	Pinned  bool
 	Version int
 	// ExpiresAt is mandatory; the module bounds how far ahead it may be.

@@ -30,6 +30,12 @@ const (
 	// CodeVersionConflict is a baseVersion that is no longer current. errorDetails carries
 	// currentVersion; see CurrentVersion.
 	CodeVersionConflict = "version_conflict"
+	// CodeVersionPruned is an earlier version that history compaction removed: asked for,
+	// restored from or pinned by a link. errorDetails carries requestedVersion and the nearest
+	// versions kept on either side; see PrunedVersion. A version that never existed is still
+	// CodeDocumentNotFound, and so is any earlier version asked for by an external user, who
+	// is never told the history has gaps.
+	CodeVersionPruned = "version_pruned"
 	// CodeDocumentLocked is another session's lock. errorDetails carries holder, via and
 	// expiresAt; see LockHolder.
 	CodeDocumentLocked = "document_locked"
@@ -131,6 +137,44 @@ func CurrentVersion(err error) (int, bool) {
 	return int(f), ok
 }
 
+// Pruned is what a version_pruned says: the version asked for and the nearest versions kept on
+// either side. A nil neighbour means none is kept on that side.
+type Pruned struct {
+	RequestedVersion  int
+	PreviousAvailable *int
+	NextAvailable     *int
+}
+
+// PrunedVersion reads a version_pruned's errorDetails. It reports false for any other failure,
+// including the document_not_found an external user gets for the same request.
+func PrunedVersion(err error) (*Pruned, bool) {
+	if !jiku.IsCode(err, CodeVersionPruned) {
+		return nil, false
+	}
+	req, ok := intDetail(err, "requestedVersion")
+	if !ok {
+		return nil, false
+	}
+	p := &Pruned{RequestedVersion: req}
+	if v, ok := intDetail(err, "previousAvailable"); ok {
+		p.PreviousAvailable = &v
+	}
+	if v, ok := intDetail(err, "nextAvailable"); ok {
+		p.NextAvailable = &v
+	}
+	return p, true
+}
+
+// intDetail reads a numeric key of errorDetails; a null or absent one is not there.
+func intDetail(err error, key string) (int, bool) {
+	v, ok := detail(err, key)
+	if !ok {
+		return 0, false
+	}
+	f, ok := v.(float64)
+	return int(f), ok
+}
+
 // LockHolder is who holds the lock, from a document_locked.
 func LockHolder(err error) (*Lock, bool) {
 	if !jiku.IsCode(err, CodeDocumentLocked) {
@@ -176,6 +220,8 @@ func Hint(err error) string {
 		return "somebody saved after your base version. Re-read it (`jiku docs get`), merge your " +
 			"change into " + cur + ", and retry with that as --base-version. Never retry with the " +
 			"new number alone: that overwrites their change."
+	case CodeVersionPruned:
+		return prunedHint(err)
 	case CodeDocumentLocked:
 		if l, ok := LockHolder(err); ok {
 			return fmt.Sprintf("%s is editing it (via %s) until %s. Wait, work read-only, or ask "+
@@ -217,4 +263,25 @@ func Hint(err error) string {
 			"`jiku whoami` shows your roles."
 	}
 	return ""
+}
+
+// prunedHint names the nearest versions kept, which is the only useful next step: the content of
+// a compacted version is gone for good.
+func prunedHint(err error) string {
+	const tail = " `jiku docs history` lists every version kept. Versions saved with --message " +
+		"are never compacted."
+	p, ok := PrunedVersion(err)
+	if !ok {
+		return "that version was removed by history compaction." + tail
+	}
+	side := func(v *int, none string) string {
+		if v == nil {
+			return none
+		}
+		return fmt.Sprintf("%d", *v)
+	}
+	return fmt.Sprintf("version %d was removed by history compaction. The nearest versions kept "+
+		"are %s before it and %s after it.%s", p.RequestedVersion,
+		side(p.PreviousAvailable, "none (no earlier one is kept)"),
+		side(p.NextAvailable, "none (no later one is kept)"), tail)
 }
