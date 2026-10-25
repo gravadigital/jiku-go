@@ -204,3 +204,16 @@ func TestDocsErrorTreatsNoEndpointAsDown(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+// TestPageSummaryOfAnUnpagedList: some module lists (attachments.list) answer items with no
+// page object. The summary said "0 item(s), limit 0" above a list that had items.
+func TestPageSummaryOfAnUnpagedList(t *testing.T) {
+	if got := pageSummary(jiku.Page{}, 3); got != "  3 item(s)" {
+		t.Errorf("unpaged: %q", got)
+	}
+	total := 9
+	if got := pageSummary(jiku.Page{Limit: 2, Returned: 2, Cursor: "c", Total: &total}, 2); got !=
+		"  2 item(s), limit 2, 9 total\n  more pages: pass --all, or --cursor c" {
+		t.Errorf("paged: %q", got)
+	}
+}

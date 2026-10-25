@@ -175,7 +175,7 @@ Values are typed from the contract: a filter on an integer column sends 15, not 
 				if err != nil {
 					return err
 				}
-				reportPage(col.Page)
+				reportPage(col)
 				return emit(os.Stdout, nil, itemsJSON(col.Items))
 			}
 
@@ -239,7 +239,16 @@ func needsContract(filters, sortBy, fields, include []string) bool {
 }
 
 // reportPage puts pagination on stderr, so stdout stays a clean array for jq.
-func reportPage(p jiku.Page) {
+func reportPage(col *jiku.Collection) {
+	progressf("%s\n", pageSummary(col.Page, len(col.Items)))
+}
+
+// pageSummary describes a page of n items. A list that answers without a page object (some
+// module lists are never paginated) has no limit to report, only its items.
+func pageSummary(p jiku.Page, n int) string {
+	if p.Limit == 0 && p.Returned == 0 && !p.HasMore() && p.Total == nil {
+		return fmt.Sprintf("  %d item(s)", n)
+	}
 	msg := fmt.Sprintf("  %d item(s), limit %d", p.Returned, p.Limit)
 	if p.Total != nil {
 		msg += fmt.Sprintf(", %d total", *p.Total)
@@ -247,7 +256,7 @@ func reportPage(p jiku.Page) {
 	if p.HasMore() {
 		msg += "\n  more pages: pass --all, or --cursor " + p.Cursor
 	}
-	progressf("%s\n", msg)
+	return msg
 }
 
 // itemsJSON joins items into one array, so -o json/table sees an array and not a stream.

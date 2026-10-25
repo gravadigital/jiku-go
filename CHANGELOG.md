@@ -132,6 +132,8 @@ All notable changes to this project are documented here. The format follows
   included. The file of a restored document was removed and downloaded again, and one with local
   edits was moved to `.jiku-docs/sin-acceso/`. A deletion older than the version already held is
   now skipped.
+- **`jiku docs query attachments.list` said "0 item(s), limit 0" above its items.** A list that
+  answers without a page object now reports how many items it carries.
 
 ### Changed
 

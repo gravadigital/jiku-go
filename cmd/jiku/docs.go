@@ -402,7 +402,7 @@ exactly what you wrote instead.`,
 					if err != nil {
 						return err
 					}
-					reportPage(col.Page)
+					reportPage(col)
 					return emit(os.Stdout, nil, itemsJSON(col.Items))
 				}
 
