@@ -137,6 +137,8 @@ All notable changes to this project are documented here. The format follows
 - **`jiku docs ls /` answered "not found" to everyone but admins**, whom alone the root grants
   read, while the hint said `jiku docs ls` shows what you can read. It now lists the topmost
   folders the person can read.
+- **`jiku docs get` printed a deleted document like a live one.** The module still answers it by
+  id, so it can be restored; stderr now says it is deleted and since when.
 
 ### Changed
 

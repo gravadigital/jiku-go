@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -234,5 +235,24 @@ func TestTopmostReadableFolders(t *testing.T) {
 	}
 	if strings.Join(paths, " ") != "/clientes/ /infra/ /privado/sub/" {
 		t.Fatalf("topmost: %v", paths)
+	}
+}
+
+// TestGetSaysTheDocumentIsDeleted: get by id still answers a deleted document, so it can be
+// restored; printed like a live one, its content read as current.
+func TestGetSaysTheDocumentIsDeleted(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stderr
+	os.Stderr = w
+	at := time.Date(2026, 10, 25, 1, 25, 17, 0, time.UTC)
+	printDocumentHeader(&docs.Document{Path: "/infra/a.md", Version: 2, Checksum: "sha256:x", DeletedAt: &at})
+	os.Stderr = saved
+	_ = w.Close()
+	b, _ := io.ReadAll(r)
+	if !strings.Contains(string(b), "DELETED at 2026-10-25T01:25:17Z") {
+		t.Fatalf("stderr: %q", b)
 	}
 }

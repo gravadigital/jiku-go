@@ -708,6 +708,10 @@ func documentWithContent(doc *docs.Document, content []byte) map[string]any {
 
 func printDocumentHeader(doc *docs.Document) {
 	progressf("%s  version %d  %s\n", doc.Path, doc.Version, doc.Checksum)
+	if doc.DeletedAt != nil {
+		progressf("DELETED at %s: this is not a live document; `jiku docs restore` brings it back\n",
+			doc.DeletedAt.UTC().Format(time.RFC3339))
+	}
 	if l := doc.Lock; l != nil && l.SessionID != "" {
 		progressf("locked by %s (via %s) until %s, session %s\n",
 			l.Holder, l.Via, l.ExpiresAt.Format(time.RFC3339), l.SessionID)
