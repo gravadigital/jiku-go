@@ -47,7 +47,7 @@ nfpms:
     file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Arch }}"
     vendor: Grava
     homepage: https://github.com/gravadigital/jiku-go
-    maintainer: Grava <noreply@grava.digital>
+    maintainer: Grava <info@grava.digital>
     description: |-
       Command-line client for Jiku's NATS API, with the jiku docs sync daemon.
       The daemon ships as a systemd user service that each person enables
