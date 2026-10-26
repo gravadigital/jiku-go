@@ -9,6 +9,47 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Documentation without folders: the docs module's contract 1.3.0.** Who may read a document
+  is now its `visibility` and the reader's class, never its folder; the client follows, and
+  still speaks a module that predates it (every new field is then empty).
+  - `modules/docs`: `VisibilityInternal`, `VisibilityPublic`, `VisibilityRestricted`;
+    `ProjectMatchDirect`, `ProjectMatchIndirect`; `FilterHasProject`, `FilterHasClient`,
+    `FilterHasTopic`. `Document` gains `CreatedByName`, `UpdatedByName`, `Clients`, `Projects`
+    and `ProjectMatch`; `Version` gains `AuthorName`; `Lock` gains `HolderName` and `Who()`;
+    `SearchHit` gains the names, `Clients`, `Projects` and `ProjectMatch`.
+    `UpdateRelations(ctx, id, baseVersion, add, remove)` runs
+    `documents.{id}.relations.update` and returns a `RelationsResult`;
+    `SuggestRelations(ctx, id)` runs `documents.suggest-relations` and returns
+    `[]RelationSuggestion`. `New` sends `folderId` and `fileName` only when given: without them
+    the module files the document by the relations in its frontmatter and names it from its
+    title. `LockHolder` reads `holderName`; `Hint` explains `permission_denied` and
+    `sharing_blocked` in terms of `restricted`.
+  - `jiku docs new` no longer requires `--folder`. New `--project`, `--client` and `--topic`
+    (repeatable) write `jiku.projects`, `jiku.clients` and `topics` into the frontmatter before
+    the document is sent, adding only what the file does not already say.
+  - `jiku docs relate <doc>` with `--add-project`, `--remove-project`, `--add-client`,
+    `--remove-client`, `--add-requirement`, `--remove-requirement`, `--add-task`,
+    `--remove-task` (repeatable) and `--base-version`.
+  - `jiku docs suggest <doc>`: the candidate projects and clients with their reason, and the
+    `relate` command that applies the first.
+  - A `permission_denied` on a `put` or `new` whose frontmatter says `restricted`, or on a
+    `restore`, says that only an admin may mark or lift «restricted».
+  - `history -o table`, `ls` and `get` show the writers' names when the module sends them;
+    `get -o json` and `search` pass them through.
+  - Where the module lists folders only to admins, `ls` works the folders out from the readable
+    documents' paths, and `--folder` in `new` and `mv` finds the id through a document filed
+    there. `ls` documents that a folder decides nothing about access, and points at
+    `--filter hasProject=false`, which the generic filter grammar already types and checks
+    against `meta.describe`.
+  - `jiku docs sync`: a `folders.list` refused to the person is the new model, not a failure.
+    Nothing is read-only on disk then (files an older module's ACL made read-only become
+    writable at the next reconciliation), and new local files go into the folders the
+    listed documents are filed in. A document made `restricted` is handled as no longer
+    readable — moved to `.sin-acceso/` — whichever of the listing, the change feed or an upload
+    notices it first, and a user's own `visibility: restricted` is notified as such.
+  - `docs/agents.md`: search before creating, create with `--project` and `--client` rather
+    than a folder, classify with `relate`, never mark `restricted`.
+
 - **`jiku docs sync` as a systemd user service, and `.deb`/`.rpm` packages.** The packages
   (GoReleaser + nfpm, `make packages`, attached to each release beside the binaries) install
   `/usr/bin/jiku`, the unit `/usr/lib/systemd/user/jiku-docs-sync.service` and

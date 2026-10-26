@@ -189,7 +189,9 @@ against the module's plane. `meta.describe` is the authority on resources, field
 |---|---|
 | `GetDocument(ctx, id, GetOptions)` | `documents.get` with `include`/`version` |
 | `GetContent(ctx, ref, GetOptions)` | id or path; fetches `content`, or downloads `contentUrl` when the module sent that instead, and verifies the checksum |
-| `New(ctx, NewDocument)` | generates the ULID when none is given, computes `sha256:<hex>`, goes by URL above 256 KiB (or when the module answers `content_too_large` inline) |
+| `New(ctx, NewDocument)` | generates the ULID when none is given, computes `sha256:<hex>`, goes by URL above 256 KiB (or when the module answers `content_too_large` inline); `FolderID` and `FileName` are optional from contract 1.3.0, and without them the module files the document by its relations |
+| `UpdateRelations(ctx, id, baseVersion, add, remove Relations)` | `documents.{id}.relations.update` (1.3.0); returns `*RelationsResult` — `ID`, `Version`, `Relations` |
+| `SuggestRelations(ctx, id)` | `documents.suggest-relations` (1.3.0); up to five `RelationSuggestion` — `ProjectID` (zero for a client alone), `ClientID`, `Score`, `Reason` |
 | `Put(ctx, id, content, PutOptions)` | `documents.{id}.update` with `baseVersion` (required), session, message, `via`, same transport choice |
 | `Move`, `Delete`, `Restore` | always with `baseVersion` |
 | `Versions(ctx, id)` / `ListVersions(ctx, id, VersionsOptions)` | `documents.versions.list`, every page; `ListVersions` filters on `protected` and `kind` |
@@ -210,6 +212,14 @@ Free functions: `NewID()` (a ULID), `ValidID`, `Checksum([]byte)` (`sha256:<hex>
 Sentinels: `ErrNotFound` (a path that resolves to nothing; the module is asked by id) and
 `ErrContentMismatch` (content that does not hash to its checksum). Notification types:
 `TypeDocumentCreated` … `TypeAccessChanged`.
+
+Contract 1.3.0 — permissions by visibility, not folders — adds: `VisibilityInternal`,
+`VisibilityPublic`, `VisibilityRestricted`; `ProjectMatchDirect`, `ProjectMatchIndirect`;
+`FilterHasProject`, `FilterHasClient`, `FilterHasTopic` (filter names for `documents.list` and
+`documents.search`); the fields `Document.CreatedByName`, `UpdatedByName`, `Clients`, `Projects`,
+`ProjectMatch`, `Version.AuthorName`, `Lock.HolderName`, and on `SearchHit` the names,
+`Clients`, `Projects` and `ProjectMatch`; `Lock.Who()`, the name or else the id. Every one of
+these fields is empty against an older module, which this package still speaks.
 
 ### Error codes
 
@@ -261,11 +271,13 @@ Ergonomic. Wherever a document or folder goes, an id or a path is accepted:
 
 | Command | Flags |
 |---|---|
-| `ls [path]` | |
+| `ls [path]` | the module's file layout, not access; where folders are listed only to admins, worked out from the readable documents |
 | `search <text>` | `--mode --filter --limit` |
 | `get <doc>` | `--version`; markdown to stdout, version/checksum/lock to stderr; `-o json` for everything; a compacted `--version` exits 5 naming the nearest versions kept |
 | `put <doc> <file\|->` | `--base-version` (required) `--session --message` |
-| `new <file\|-> --folder <folder>` | `--name --id --message` |
+| `new <file\|->` | `--project --client --topic` (repeatable, written into the frontmatter) `--folder --name --id --message`; without `--folder` the module files it |
+| `relate <doc>` | `--add-project --remove-project --add-client --remove-client --add-requirement --remove-requirement --add-task --remove-task` (repeatable) `--base-version` (required) |
+| `suggest <doc>` | candidates with `projectId`, `clientId`, `score`, `reason` |
 | `mv <doc> <dest>` | `--base-version` (required) `--session`; `<dest>` is a folder, or a path ending in `.md` to rename |
 | `rm <doc>` | `--base-version` (required) |
 | `restore <doc>` | `--from-version --base-version` (both required); a compacted `--from-version` exits 5 |
@@ -300,7 +312,8 @@ configuration keys and its on-disk layout are. It runs as the systemd user servi
 | Catch-up | `documents.changes` from `lastSeq` at start, on every reconnect and every 30 s |
 | Full reconciliation | at start without state, on `access.changed`, on `invalid_cursor`, and every 24 h: the readable list compared with the state |
 | No longer readable | moved to `<dir>/.sin-acceso/`, never deleted |
-| Read-only folders | files whose folder grants only `read` are made read-only on disk |
+| Read-only folders | against a module older than 1.3.0, files whose folder grants only `read` are made read-only on disk. From 1.3.0 a person writes everything they read and `folders.list` refuses them: nothing is read-only, and folders are learned from the documents' paths |
+| Restricted | a document an admin makes `restricted` vanishes for a user and is handled as no longer readable: moved to `.sin-acceso/` |
 | Ignored | anything not `.md` (warned once), hidden files and folders, `*.swp`, `*~`, `.#*`, conflict copies, `.sin-acceso/` |
 | Local deletion | not propagated: the file comes back at the next reconciliation; `jiku docs rm` deletes |
 | Module down | offline: nothing is lost, files keep being edited, and everything is reconciled when the ping answers again |

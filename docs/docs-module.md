@@ -1,8 +1,8 @@
 # The docs module
 
-Jiku can run an optional **docs module**: markdown documentation in folders, with per-folder
-permissions, versions, edit locks, attachments, shared links and live notifications. This client
-speaks to it with the same connection and the same identity it uses for core:
+Jiku can run an optional **docs module**: markdown documentation linked to clients and
+projects, with versions, edit locks, attachments, shared links and live notifications. This
+client speaks to it with the same connection and the same identity it uses for core:
 
 - **`jiku docs …`** — commands for people and agents.
 - **`jiku docs sync`** — a daemon that mirrors what you can read into a local folder, both ways.
@@ -46,6 +46,30 @@ with `jiku-docs`.
 
 `jiku doctor` adds the module as one informational line after core's five checks.
 
+## Visibility, not folders
+
+From the module's contract 1.3.0, **who may read a document is decided by its `visibility` and
+the reader's class, never by the folder it is filed in**:
+
+| `visibility` | admin | user | external user | service |
+|---|---|---|---|---|
+| `internal` (default) | reads, writes | reads, writes | never | everything |
+| `public` | reads, writes | reads, writes | reads, if linked to one of their projects | everything |
+| `restricted` | reads, writes | **never** | never | everything |
+
+- **What you cannot see does not exist.** A restricted document is absent for a user from every
+  listing, search, history, change feed and notification, and asking for it by id is
+  `document_not_found`.
+- **Only an admin sets or lifts `restricted`.** A user's `put`, `new` or `restore` that would do
+  either is `permission_denied`; the CLI says so in those words. A restricted document takes no
+  shared links (`sharing_blocked`), and making one restricted revokes its links.
+- **Folders are how files are kept**, which the sync daemon mirrors and `ls` shows. The module
+  lists them to admins and services only; a person's `ls` works them out from the documents.
+  Their ACL rules, `externalBlocked` and `sharingBlocked` no longer do anything.
+- `--force` on `unlock` needs an admin.
+
+Against a module older than 1.3.0 the folder ACL still decides, and the fields below are absent.
+
 ## Paths and ids
 
 Documents and folders have ULID ids (`01JBX7Q2M4N8P6R3T5V9W1Y0ZA`) and paths
@@ -56,10 +80,11 @@ exist or you may not see it.
 ## Reading
 
 ```bash
-jiku docs ls /clientes/acme/                          # folders and documents in a folder
-jiku docs ls /                                        # the root; without read on it, the topmost folders you can read
 jiku docs search '"integración con aduana" -prueba'   # full text, best hits first
 jiku docs search staging --filter projectId=12
+jiku docs query documents.list --filter clientId=4 --sort -updatedAt
+jiku docs query documents.list --filter hasProject=false    # not linked to a project yet
+jiku docs ls /clientes/acme/                          # how the files are kept, folder by folder
 jiku docs get /infra/servidores/staging.md > staging.md
 jiku docs get /infra/servidores/staging.md --version 3
 jiku docs get /infra/servidores/staging.md -o json    # metadata and content in one object
@@ -69,6 +94,25 @@ jiku docs history /infra/servidores/staging.md
 `get` prints the markdown to stdout, exactly as stored, and the version, checksum and lock to
 stderr — so redirecting stdout gives a clean file and the version is still on screen. Content
 above 256 KiB comes through a presigned URL; `get` follows it and checks the checksum either way.
+
+**Finding by subject.** `documents.list` and `documents.search` filter on `clientId`,
+`projectId` and `topic`, and from contract 1.3.0 on `hasProject`, `hasClient` and `hasTopic`:
+with `false` they find what nobody has classified ("sin proyecto" means no direct link, neither
+through a requirement nor a task). `--filter hasProject=false` goes through the generic filter
+grammar, typed and checked against the module's `meta.describe`. Every item carries its `clients`
+and `projects`; filtered by `projectId`, `projectMatch` says whether the project is in the
+document's own `jiku.projects` (`direct`) or reached through a requirement or a task
+(`indirect`).
+
+**Names.** From 1.3.0 a document carries `createdByName` and `updatedByName`, a version
+`authorName`, a lock `holderName`. `get` prints who saved last, `get -o json` and `search` pass
+the names through, `ls` shows the last writer and `history -o table` the author by name — each
+falling back to the id against an older module.
+
+**`ls` is about files, not access.** It shows how the module keeps its files — the layout
+`jiku docs sync` mirrors — and nothing about who may read them. `ls /` without read on the root
+lists the topmost folders you can read; where folders are listed only to admins, `ls` works the
+folders out from the paths of the documents you can read, and a folder's `id` is left empty.
 
 ## History and compaction
 
@@ -119,7 +163,9 @@ jiku docs cmd folders.new '{"id":"01JC…","parentId":"01JA…","name":"reunione
 ## Writing
 
 ```bash
-jiku docs new acta.md --folder /clientes/acme/pzt/reuniones/ --message "Acta del 24/10"
+jiku docs new acta.md --project 12 --topic reuniones --message "Acta del 24/10"
+jiku docs relate /general/acta.md --add-project 12 --base-version 1
+jiku docs suggest /general/acta.md
 jiku docs put /infra/servidores/staging.md staging.md --base-version 7 --message "Puerto SSH"
 jiku docs mv /infra/a.md /infra/servidores/            --base-version 4
 jiku docs rm /infra/viejo.md                           --base-version 2
@@ -137,6 +183,27 @@ same content twice succeeds without a second version.
 
 The frontmatter (`title`, `visibility`, `topics`, `jiku: {clients, projects, requirements,
 tasks}`) is part of the content: relations and visibility change with an ordinary `put`.
+
+**Creating: say what it is about.** Without `--folder`, the module files a new document by the
+relations in its frontmatter — `/clientes/<client>/<project>/` with a project (the first one,
+with its client from core), `/clientes/<client>/general/` with a client alone, `/general/` with
+neither — creating the folders it needs, and names the file from the title (`-2`, `-3` when
+taken). `--project`, `--client` and `--topic`, each repeatable, are written into the frontmatter
+before it is sent, adding only what the file does not already say; the file on disk is not
+touched. The reply's `path` says where it went. Changing relations later never moves it. A
+module older than 1.3.0 needs `--folder` (and `--name` from stdin), and the error says so.
+
+**Relating.** `relate` runs `documents.{id}.relations.update`: `--add-project`,
+`--remove-project`, `--add-client`, `--remove-client`, `--add-requirement`,
+`--remove-requirement`, `--add-task` and `--remove-task`, each repeatable, with
+`--base-version`. The module rewrites the `jiku:` block alone and saves a version with a message
+of its own; adding a project adds its client. An id that does not exist is `invalid_relation`. A
+change that changes nothing succeeds with the current version.
+
+**Suggesting.** `suggest` runs `documents.suggest-relations`: up to five projects or clients the
+title (which weighs more) or the content mentions, best first, each with its `reason`
+("El título menciona «Videoconferencia»"), leaving out projects already linked. It changes
+nothing, and prints the `relate` command that applies the first.
 
 A write may carry a warning — `possible_secret_detected` — which does not block it. Documents
 are not the place for credentials.
@@ -217,11 +284,11 @@ edits back.
 | **From Jiku** | Live notifications bring a change in seconds; the file is replaced atomically (written beside it, then renamed), so an open editor reloads it once. |
 | **To Jiku** | A file that has not changed for 2 s (`debounce`) is uploaded on top of the version it was made from, recorded as yours, `via: human`. |
 | **Conflicts** | Never resolved by overwriting. The remote version is written beside yours as `<name>.remoto-v<version>.md`. Merge it into your file and **delete the copy**: that is what tells the daemon to upload the merge. Until then the file waits. |
-| **New files** | A new `.md` in a folder that exists in Jiku, where you can write, becomes a document. Folders are created in Jiku, not by the daemon. |
+| **New files** | A new `.md` in a folder that exists in Jiku becomes a document. Where the module lists folders only to admins (1.3.0), a folder is known from a document you can read filed in it; elsewhere use `jiku docs new`. Folders are created in Jiku, not by the daemon. |
 | **Deleting a file** | Does not delete the document; it comes back. `jiku docs rm` deletes. |
 | **Deleted in Jiku** | An unchanged file is removed; one with local edits is moved aside. |
-| **No longer readable** | Moved to `<folder>/.sin-acceso/`, never deleted. |
-| **Read-only folders** | Their files are read-only on disk. A forced local edit is not uploaded. |
+| **No longer readable** | Moved to `<folder>/.sin-acceso/`, never deleted — including a document an admin made `restricted`, which a user can no longer see by any route. |
+| **Writable** | From contract 1.3.0, everything you can read: files an older module's ACL made read-only become writable at the next reconciliation. Against an older module, a folder that grants only `read` keeps its files read-only on disk, and a forced edit is not uploaded. |
 | **Compaction** | Irrelevant to it: it only ever downloads current versions, and a conflict copy is the current version too. A base version that was compacted still compares as before. |
 | **Ignored** | Files that are not `.md` (said once), hidden files and folders (`.sin-acceso/` among them), `*.swp`, `*~`, `#…#` and the conflict copies. Attachments are not downloaded. |
 | **Module down** | Works offline: edits stay on disk and are uploaded when it answers again. |
@@ -328,7 +395,7 @@ versions and codes — never a document's content.
 
 **Desktop notifications** go through `org.freedesktop.Notifications` on the session bus: a
 conflict, a file that could not be uploaded (read-only folder, not `.md`, invalid frontmatter,
-folder missing in Jiku), the module down for more than five minutes, the module uninstalled
+folder missing in Jiku, `restricted` set by somebody who is not an admin), the module down for more than five minutes, the module uninstalled
 (critical), the login refused (critical). Each kind is said at most once every five minutes per
 file, and a burst becomes one notification: "Conflicto en /infra/a.md y 19 archivos más". With no
 session bus they are skipped; the log has the same facts. `notifications: false` turns them off.
@@ -355,7 +422,8 @@ who prefers no service; outside systemd every notification to it is a no-op.
 ## Permissions
 
 What a role may do on the module is the deployment's: the auth-callout's templates decide what
-reaches the module's subjects, and the module decides again per folder. What this client needs,
+reaches the module's subjects, and the module decides again per document — by its visibility
+from contract 1.3.0, per folder before. What this client needs,
 as template lines:
 
 | For | Needs |

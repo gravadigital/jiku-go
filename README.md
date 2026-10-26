@@ -237,6 +237,7 @@ jiku docs status                                      # installed? compatible? a
 jiku docs search '"integración con aduana"' --filter clientId=4
 jiku docs get /infra/servidores/staging.md > staging.md
 jiku docs put /infra/servidores/staging.md staging.md --base-version 7 --message "Puerto SSH"
+jiku docs new acta.md --project 12 --topic reuniones  # filed by the module, by its relations
 jiku docs edit /infra/servidores/staging.md           # lock, $EDITOR, save, release
 jiku docs sync                                        # mirror ~/JikuDocs both ways
 systemctl --user enable --now jiku-docs-sync          # ...as a systemd user service

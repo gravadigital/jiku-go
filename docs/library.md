@@ -528,7 +528,9 @@ if v, ok := docs.CurrentVersion(err); ok {
     // version_conflict: re-read version v, merge, retry on it
 }
 
-res, err = d.New(ctx, docs.NewDocument{FolderID: folder.ID, FileName: "acta.md", Content: body})
+res, err = d.New(ctx, docs.NewDocument{Content: body})   // filed by its frontmatter's relations; res.Path says where
+rel, err := d.UpdateRelations(ctx, doc.ID, doc.Version, docs.Relations{Projects: []int64{12}}, docs.Relations{})
+todo, err := d.List(ctx, "documents", jiku.List{Filter: jiku.F{docs.FilterHasProject: false}})
 hits, err := d.Search(ctx, docs.SearchQuery{Query: `"aduana" -prueba`, Filter: jiku.F{"projectId": 12}})
 lock, err := d.Lock(ctx, doc.ID, docs.LockOptions{TTL: 5 * time.Minute})
 att, err := d.Attach(ctx, docs.AttachOptions{DocumentID: doc.ID, FileName: "red.png", Content: png})

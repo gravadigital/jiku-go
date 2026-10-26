@@ -15,19 +15,32 @@ export JIKU_VIA=agent
 
 ## The rules
 
-1. **Search before creating.** `jiku docs search "<words>"` (and `jiku docs ls <folder>`) before
+1. **Search before creating.** `jiku docs search "<words>"`, narrowed with
+   `--filter projectId=<id>` or `--filter clientId=<id>` when you know what it is about, before
    `jiku docs new`. A second document on the same subject is worse than an edit to the first.
-2. **Cite what you use.** When you answer from the documentation, name the document's path and
+2. **Say what a document is about, not where it goes.** Create with `--project` and `--client`
+   (and `--topic`), and let the module file it: `jiku docs new acta.md --project 12 --topic
+   reuniones`. Do not pick a folder with `--folder` unless the person asks for one; the folder
+   is only where the file is kept, and decides nothing about who may read it.
+3. **Classify with `relate`.** To link an existing document to a project, a client, a
+   requirement or a task, use `jiku docs relate <doc> --add-project <id> --base-version <n>`
+   rather than editing the `jiku:` block by hand. `jiku docs suggest <doc>` proposes candidates
+   with a reason; confirm with the person before applying one that is not obvious.
+   `jiku docs query documents.list --filter hasProject=false` lists what nobody classified yet.
+4. **Never mark a document `restricted`.** Only an admin may set `visibility: restricted`, or
+   remove it; the module refuses anybody else (`permission_denied`). If something looks like it
+   should be restricted, tell the person.
+5. **Cite what you use.** When you answer from the documentation, name the document's path and
    the version you read: `/infra/servidores/staging.md` (v7).
-3. **Save only what the person accepted.** Show the change; write it only after they agree. Use
+6. **Save only what the person accepted.** Show the change; write it only after they agree. Use
    `--message` to say what changed.
-4. **Finish an important piece of work with `--message`.** A version saved with a message is
+7. **Finish an important piece of work with `--message`.** A version saved with a message is
    protected: the module never removes it. Your saves without one are compacted like a person's
    — after a day only the last of each editing session is kept, after 30 days the last of each
    day — so the point you want to be able to return to needs a message.
-5. **Never `share` or `revoke` without explicit confirmation.** A shared link lets anyone with the
+8. **Never `share` or `revoke` without explicit confirmation.** A shared link lets anyone with the
    URL read the document, signed in or not. The CLI cannot ask for you; you must.
-6. **Do not write through the person's synced folder.** If `jiku docs sync` runs (the
+9. **Do not write through the person's synced folder.** If `jiku docs sync` runs (the
    `jiku-docs-sync` service; `jiku docs sync status` says), its folder is theirs: a file you edit
    there is uploaded as `via: human`, in their name. Read it if useful; write with `jiku docs put`.
    Do not start a second `jiku docs sync` either — it is refused while the service runs.
@@ -63,8 +76,8 @@ jiku docs get <path> -o json        # content, version, checksum and lock in one
 | `version_conflict` | Somebody saved after your base. Re-read (`jiku docs get`), show the person the difference, propose a merge, and save the merge with the **new** base. Never resend your text with only the number changed. |
 | `document_locked` | Somebody is editing (the error names them). Wait, or work read-only. |
 | `lock_not_held` | Your lock expired or was taken. Take it again and re-read before saving. |
-| `frontmatter_invalid` / `invalid_relation` | The YAML at the top is wrong, or names a Jiku id that does not exist or you cannot see. Fix it; the details name the line or the id. |
-| `permission_denied` | You can read this but not change it. Tell the person. |
+| `frontmatter_invalid` / `invalid_relation` | The YAML at the top is wrong, or names a Jiku id that does not exist or you cannot see (also from `relate`). Fix it; the details name the line or the id. |
+| `permission_denied` | You can read this but not make this change. If your text sets or removes `visibility: restricted`, undo that: only an admin may. Otherwise tell the person. |
 | `version_pruned` | The earlier version you asked for (`get --version`, `restore --from-version`) was removed by history compaction. The error names the nearest versions kept; use one of them, or `jiku docs history` to choose. Exit status 5. |
 | `*_not_found` | It does not exist **or** you may not see it — the two are not distinguished. |
 

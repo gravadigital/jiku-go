@@ -1224,7 +1224,9 @@ func NewClient(bus Bus, opts Options) *Client
 | `Query`, `Command`, `List`, `Iterate`, `Contract`, `Describe` | the module's plane, as on core; `Describe` selects resources from the full contract |
 | `GetDocument(ctx, id, GetOptions)` | `documents.get` |
 | `GetContent(ctx, ref, GetOptions)` | id or path; inline content or `contentUrl`, checked against the checksum |
-| `New(ctx, NewDocument)` / `Put(ctx, id, content, PutOptions)` | id and checksum computed; inline or by URL |
+| `New(ctx, NewDocument)` / `Put(ctx, id, content, PutOptions)` | id and checksum computed; inline or by URL; `New` without `FolderID` and `FileName` lets the module file and name it (1.3.0) |
+| `UpdateRelations(ctx, id, baseVersion, add, remove Relations)` | `documents.{id}.relations.update` (1.3.0) → `*RelationsResult` |
+| `SuggestRelations(ctx, id)` | `documents.suggest-relations` (1.3.0) → `[]RelationSuggestion`, never nil |
 | `Move`, `Delete`, `Restore` | always with a base version |
 | `Versions(ctx, id)` / `ListVersions(ctx, id, VersionsOptions)` | the history, newest first; `VersionsOptions{ProtectedOnly, Kind}` filters on the module |
 | `Lock(ctx, id, LockOptions)` / `Unlock(ctx, id, session, force)` | session generated if none |
@@ -1252,6 +1254,29 @@ func PrunedVersion(err error) (*Pruned, bool) // from CodeVersionPruned
 `CodeVersionPruned` answers `documents.get` with `version`, `restore` with `fromVersion` and a
 pinned `Share`; an external user gets `CodeDocumentNotFound` instead. `jiku docs get --version`,
 `restore` and `share --pinned` print the nearest versions kept and exit 5.
+
+Documentation without folders (contract 1.3.0) — who may read is the document's visibility, not
+its folder:
+
+```go
+const VisibilityInternal, VisibilityPublic, VisibilityRestricted = "internal", "public", "restricted"
+const ProjectMatchDirect, ProjectMatchIndirect = "direct", "indirect"
+const FilterHasProject, FilterHasClient, FilterHasTopic = "hasProject", "hasClient", "hasTopic"
+
+// Document gains CreatedByName, UpdatedByName string; Clients, Projects []int64; ProjectMatch string.
+// Version gains AuthorName; Lock gains HolderName and Who() (the name, else the id); SearchHit
+// gains CreatedByName, UpdatedByName, Clients, Projects, ProjectMatch. Empty from an older module.
+type RelationsResult struct { ID string; Version int; Relations Relations }
+type RelationSuggestion struct { ProjectID, ClientID int64; Score float64; Reason string } // ProjectID 0: a client alone
+```
+
+- **[contract] Only an admin sets or lifts `restricted`.** A user's `New`, `Put` or `Restore` that
+  would do either is `CodePermissionDenied`, and for a user a restricted document is
+  `CodeDocumentNotFound` everywhere. `Hint` says so; the CLI names it outright when the content
+  declares it.
+- **[contract] folders.\* answer only admins and services.** A folder decides nothing about
+  access any more; its ACL, `ExternalBlocked`, `SharingBlocked` and `EffectivePermission` mean
+  something only to an older module.
 
 - **[contract] Every creation takes a client-generated ULID**, and a retry with the same id is the
   same creation. Generate it once per intended creation, never per attempt.
