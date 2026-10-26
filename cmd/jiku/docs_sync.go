@@ -63,12 +63,15 @@ same paths.
                         it was made from; a conflict produces the same .remoto copy.
   Conflicts             merge the copy into the file and delete the copy: that is what tells
                         the sync to upload your merge.
-  New .md files         in a folder that exists in Jiku and where you can write become
+  New .md files         in a folder that already holds a document you can read become
                         documents. Other files are ignored, and so are hidden ones, editor
-                        swap files and the conflict copies.
+                        swap files and the conflict copies. Elsewhere, ` + "`jiku docs new`" + `
+                        creates it and Jiku files it by its relations.
   Deleting a file       does not delete the document: it comes back. Use ` + "`jiku docs rm`" + `.
-  Read-only folders     their files are read-only on disk.
-  No longer readable    moved to <folder>/.sin-acceso/, never deleted.
+  Writable              everything you can read, from contract 1.3.0; an older module's
+                        read-only folders keep their files read-only on disk.
+  No longer readable    moved to <folder>/.sin-acceso/, never deleted — and so is a document
+                        an admin made «restricted».
   Module down           keeps working offline and catches up when it is back.
   Module uninstalled    stops syncing, leaves every file in place, and resumes when it is back.
 
