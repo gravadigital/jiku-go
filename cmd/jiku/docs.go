@@ -9,12 +9,14 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/gravadigital/jiku-go"
+	"github.com/gravadigital/jiku-go/internal/frontmatter"
 	"github.com/gravadigital/jiku-go/modules"
 	"github.com/gravadigital/jiku-go/modules/docs"
 	"github.com/spf13/cobra"
@@ -35,8 +37,9 @@ func newDocsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "docs",
 		Short: "Work with the docs module: documents, folders, locks, links and sync",
-		Long: `The docs module is an optional part of Jiku that keeps markdown documentation, with
-per-folder permissions, versions, edit locks, attachments and shared links.
+		Long: `The docs module is an optional part of Jiku that keeps markdown documentation, linked to
+clients and projects, with versions, edit locks, attachments and shared links. Who may read a
+document is its visibility (internal, public, restricted), not the folder it is filed in.
 
 Every command here first looks the module up in the registry and pings it. If it is not
 installed, or installed and down, the command says which and exits non-zero (3 and 4
@@ -52,7 +55,9 @@ Wherever a document or a folder is expected, an id or a path works:
 New ids are generated (ULIDs), checksums computed (sha256), content above 256 KiB goes through
 a presigned upload, and ` + "`via`" + ` is sent from $` + docs.EnvVia + ` ("agent" or "human"; unset is human).
 
-FOR AGENTS. Search before creating, so nothing is duplicated. Cite the document and its version
+FOR AGENTS. Search before creating, so nothing is duplicated. Create with --project and
+--client rather than choosing a folder, and classify what exists with ` + "`relate`" + ` (` + "`suggest`" + `
+proposes). Never mark a document restricted: only admins may. Cite the document and its version
 when answering from it. Save only what the person accepted. Never run ` + "`share`" + ` or ` + "`revoke`" + `
 without the person's explicit confirmation: the CLI cannot impose that gate. Set
 ` + docs.EnvVia + `=agent so the history says who wrote what. At the end of a piece of work, save
@@ -69,6 +74,8 @@ See docs/agents.md.`,
 		newDocsGetCmd(),
 		newDocsPutCmd(),
 		newDocsNewCmd(),
+		newDocsRelateCmd(),
+		newDocsSuggestCmd(),
 		newDocsMvCmd(),
 		newDocsRmCmd(),
 		newDocsRestoreCmd(),
@@ -133,7 +140,8 @@ func docsError(err error) error {
 	if errors.Is(err, jiku.ErrNoEndpoint) {
 		return exitError{code: exitModuleDown, error: err}
 	}
-	if h := docs.Hint(err); h != "" {
+	var known knownCause
+	if h := docs.Hint(err); h != "" && !errors.As(err, &known) {
 		err = fmt.Errorf("%w\n  %s", err, h)
 	}
 	if jiku.IsCode(err, docs.CodeVersionPruned) {
@@ -524,6 +532,21 @@ type lsEntry struct {
 	Path      string     `json:"path"`
 	Version   int        `json:"version,omitempty"`
 	UpdatedAt *time.Time `json:"updatedAt,omitempty"`
+	// UpdatedBy is the last writer's name, or their id from a module that predates names.
+	UpdatedBy string `json:"updatedBy,omitempty"`
+}
+
+func documentEntry(doc docs.Document) lsEntry {
+	name := doc.FileName
+	if name == "" {
+		name = path.Base(doc.Path)
+	}
+	by := doc.UpdatedByName
+	if by == "" {
+		by = doc.UpdatedBy
+	}
+	return lsEntry{Type: "document", ID: doc.ID, Name: name, Path: doc.Path, Version: doc.Version,
+		UpdatedAt: doc.UpdatedAt, UpdatedBy: by}
 }
 
 func newDocsLsCmd() *cobra.Command {
@@ -533,7 +556,17 @@ func newDocsLsCmd() *cobra.Command {
 		Long: `Lists what is directly inside a folder, given by path or id; the root is the default.
 
   jiku docs ls
-  jiku docs ls /clientes/acme/ -o table`,
+  jiku docs ls /clientes/acme/ -o table
+
+Folders are how the module files documents — what ` + "`jiku docs sync`" + ` mirrors — and nothing else:
+where a document is filed does not decide who may read it (its visibility does), and the module
+files new documents by their relations. To find documents by what they are about, filter instead:
+
+  jiku docs query documents.list --filter projectId=12
+  jiku docs query documents.list --filter hasProject=false     # not linked to any project yet
+
+Where the module lists folders only to admins (contract 1.3.0), ls works out the folders from
+the paths of the documents you can read, and a folder's id is left empty.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signalContext()
@@ -544,6 +577,9 @@ func newDocsLsCmd() *cobra.Command {
 			}
 			return withDocs(ctx, func(_ *jiku.Client, d *docs.Client) error {
 				f, err := d.ResolveFolder(ctx, ref)
+				if foldersRefused(err) && strings.HasPrefix(ref, "/") {
+					return lsByDocuments(ctx, d, ref)
+				}
 				if errors.Is(err, docs.ErrNotFound) && strings.Trim(ref, "/") == "" {
 					return lsTopmost(ctx, d)
 				}
@@ -559,18 +595,65 @@ func newDocsLsCmd() *cobra.Command {
 					entries = append(entries, lsEntry{Type: "folder", ID: sub.ID, Name: sub.Name, Path: sub.Path})
 				}
 				for _, doc := range documents {
-					name := doc.FileName
-					if name == "" {
-						name = path.Base(doc.Path)
-					}
-					entries = append(entries, lsEntry{Type: "document", ID: doc.ID, Name: name,
-						Path: doc.Path, Version: doc.Version, UpdatedAt: doc.UpdatedAt})
+					entries = append(entries, documentEntry(doc))
 				}
 				progressf("%s: %d folder(s), %d document(s)\n", f.Path, len(folders), len(documents))
 				return emit(os.Stdout, entries, nil)
 			})
 		},
 	}
+}
+
+// lsByDocuments answers ls for a person on a module that lists folders only to admins: every
+// readable document under the path, the ones directly in it listed, the deeper ones folded into
+// the subfolder they are in.
+func lsByDocuments(ctx context.Context, d *docs.Client, ref string) error {
+	dir := strings.TrimSuffix(ref, "/") + "/"
+	var all []docs.Document
+	it := d.Iterate(ctx, "documents", jiku.List{Filter: jiku.F{"pathPrefix": dir}, Sort: []string{"path"}})
+	for it.Next() {
+		var doc docs.Document
+		if err := it.Item().Into(&doc); err != nil {
+			return err
+		}
+		all = append(all, doc)
+	}
+	if err := it.Err(); err != nil {
+		return err
+	}
+	entries, folders := entriesUnder(dir, all)
+	if len(entries) == 0 && dir != "/" {
+		return fmt.Errorf("%w: no document you can read is filed under %s", docs.ErrNotFound, dir)
+	}
+	progressf("%s: %d folder(s), %d document(s) — worked out from the documents you can read\n",
+		dir, folders, len(entries)-folders)
+	return emit(os.Stdout, entries, nil)
+}
+
+// entriesUnder lists what is directly in dir from documents anywhere under it: the subfolders
+// first, by path, then the documents. It returns how many of the entries are folders.
+func entriesUnder(dir string, all []docs.Document) ([]lsEntry, int) {
+	var folders, documents []lsEntry
+	seen := map[string]bool{}
+	for _, doc := range all {
+		if len(doc.Path) < len(dir) || !strings.EqualFold(doc.Path[:len(dir)], dir) {
+			continue
+		}
+		rest := doc.Path[len(dir):]
+		sub, _, nested := strings.Cut(rest, "/")
+		if !nested {
+			documents = append(documents, documentEntry(doc))
+			continue
+		}
+		key := strings.ToLower(sub)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		folders = append(folders, lsEntry{Type: "folder", Name: sub, Path: doc.Path[:len(dir)] + sub + "/"})
+	}
+	sort.Slice(folders, func(i, j int) bool { return folders[i].Path < folders[j].Path })
+	return append(folders, documents...), len(folders)
 }
 
 // lsTopmost answers `ls /` for someone who may not read the root, which is everyone but the
@@ -626,8 +709,13 @@ func newDocsSearchCmd() *cobra.Command {
   jiku docs search '"integración con aduana" -prueba'
   jiku docs search staging --filter projectId=12 --filter 'updatedAt>=2026-06-01T00:00:00Z'
 
---filter takes the names documents.list declares (` + "`jiku docs describe documents`" + `). The best
---limit hits come back, not a page: search does not paginate.`,
+--filter takes the names documents.list declares (` + "`jiku docs describe documents`" + `), among
+them hasProject, hasClient and hasTopic on a module with contract 1.3.0:
+
+  jiku docs search acta --filter hasProject=false      # what nobody has classified yet
+
+Each hit carries its clients, its projects and the writers' names when the module sends them.
+The best --limit hits come back, not a page: search does not paginate.`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signalContext()
@@ -720,13 +808,16 @@ func documentWithContent(doc *docs.Document, content []byte) map[string]any {
 
 func printDocumentHeader(doc *docs.Document) {
 	progressf("%s  version %d  %s\n", doc.Path, doc.Version, doc.Checksum)
+	if doc.UpdatedByName != "" {
+		progressf("last saved by %s\n", doc.UpdatedByName)
+	}
 	if doc.DeletedAt != nil {
 		progressf("DELETED at %s: this is not a live document; `jiku docs restore` brings it back\n",
 			doc.DeletedAt.UTC().Format(time.RFC3339))
 	}
 	if l := doc.Lock; l != nil && l.SessionID != "" {
 		progressf("locked by %s (via %s) until %s, session %s\n",
-			l.Holder, l.Via, l.ExpiresAt.Format(time.RFC3339), l.SessionID)
+			l.Who(), l.Via, l.ExpiresAt.Format(time.RFC3339), l.SessionID)
 	}
 }
 
@@ -751,6 +842,9 @@ re-read, merge, and retry with the new base.
 Saving content identical to the current version succeeds without a new version, so retrying
 after a timeout is safe.
 
+Only an admin may set ` + "`visibility: restricted`" + ` in the frontmatter, or remove it: anybody else
+is refused with permission_denied.
+
 --message also PROTECTS the version: history compaction never removes it. Versions saved without
 one, by a person or by an agent, are compacted by editing session — after a day only the last of
 each session is kept, after 30 days the last of each day. Save with --message at a point worth
@@ -770,7 +864,7 @@ returning to ("Versión enviada al cliente"), and at the end of an agent's piece
 				}
 				res, err := d.Put(ctx, id, content, docs.PutOptions{BaseVersion: base, SessionID: session, Message: message})
 				if err != nil {
-					return err
+					return restrictedError(err, content)
 				}
 				reportWrite("saved", res)
 				return emit(os.Stdout, res, nil)
@@ -786,20 +880,36 @@ returning to ("Versión enviada al cliente"), and at the end of an agent's piece
 
 func newDocsNewCmd() *cobra.Command {
 	var (
-		folder  string
-		name    string
-		id      string
-		message string
+		folder   string
+		name     string
+		id       string
+		message  string
+		projects []int64
+		clients  []int64
+		topics   []string
 	)
 	cmd := &cobra.Command{
 		Use:   "new <file|->",
 		Short: "Create a document",
-		Long: `Creates a document in a folder from a file (or stdin, with - and --name).
+		Long: `Creates a document from a file (or stdin, with -).
 
-  jiku docs new acta.md --folder /clientes/acme/pzt/reuniones/
-  cat notas.md | jiku docs new - --folder 01JA... --name 2026-10-24.md
+Say what it is about, not where it goes: the module files it by the relations in its
+frontmatter — /clientes/<client>/<project>/ with a project, /clientes/<client>/general/ with a
+client alone, /general/ with neither — and derives the file name from the title. Where it is
+filed decides nothing about who may read it.
 
-Search first (` + "`jiku docs search`" + `): creating what already exists makes two documents.
+  jiku docs new acta.md --project 12 --topic reuniones
+  cat notas.md | jiku docs new - --client 4 --message "Notas del kickoff"
+
+--project, --client and --topic (each repeatable) are written into the frontmatter before the
+document is created — ` + "`jiku.projects`" + `, ` + "`jiku.clients`" + ` and ` + "`topics`" + ` — adding only what the file does not
+already say; the file on disk is not changed. A project brings its client along.
+
+--folder still files it in a folder of your choosing, by path or id, and --name names the file
+(by default, with --folder, the file's own name). A module older than contract 1.3.0 needs both.
+
+Search first (` + "`jiku docs search`" + `): creating what already exists makes two documents. Leave
+` + "`visibility: restricted`" + ` alone: only an admin may set it, and anybody else is refused.
 
 The id is generated and printed. If the command times out, retry with --id <that id>: the
 module recognises a repeat and returns the document instead of creating a second one.`,
@@ -807,13 +917,14 @@ module recognises a repeat and returns the document instead of creating a second
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signalContext()
 			defer cancel()
-			if name == "" {
-				if args[0] == "-" {
-					return fmt.Errorf("reading from stdin needs --name <file name>.md")
-				}
+			if name == "" && folder != "" && args[0] != "-" {
 				name = filepath.Base(args[0])
 			}
 			content, err := readSource(args[0])
+			if err != nil {
+				return err
+			}
+			content, err = addRelations(content, clients, projects, topics)
 			if err != nil {
 				return err
 			}
@@ -822,26 +933,127 @@ module recognises a repeat and returns the document instead of creating a second
 				progressf("id %s (to retry safely: --id %s)\n", id, id)
 			}
 			return withDocs(ctx, func(_ *jiku.Client, d *docs.Client) error {
-				f, err := d.ResolveFolder(ctx, folder)
-				if err != nil {
-					return err
+				nd := docs.NewDocument{ID: id, FileName: name, Content: content, Message: message}
+				if folder != "" {
+					fid, err := resolveFolderID(ctx, d, folder)
+					if err != nil {
+						return err
+					}
+					nd.FolderID = fid
 				}
-				res, err := d.New(ctx, docs.NewDocument{ID: id, FolderID: f.ID, FileName: name,
-					Content: content, Message: message})
+				res, err := d.New(ctx, nd)
 				if err != nil {
-					return err
+					return newError(err, folder == "" || name == "", content)
 				}
 				reportWrite("created", res)
 				return emit(os.Stdout, res, nil)
 			})
 		},
 	}
-	cmd.Flags().StringVar(&folder, "folder", "", "the folder, by path or id (required)")
-	cmd.Flags().StringVar(&name, "name", "", "file name, ending in .md (default: the file's own)")
-	cmd.Flags().StringVar(&id, "id", "", "the new document's id; reuse it to retry safely")
-	cmd.Flags().StringVar(&message, "message", "", "what this is, for the history")
-	_ = cmd.MarkFlagRequired("folder")
+	f := cmd.Flags()
+	f.StringVar(&folder, "folder", "", "file it in this folder, by path or id (default: the module places it)")
+	f.StringVar(&name, "name", "", "file name, ending in .md (default: from the title; with --folder, the file's own)")
+	f.StringVar(&id, "id", "", "the new document's id; reuse it to retry safely")
+	f.StringVar(&message, "message", "", "what this is, for the history")
+	f.Int64SliceVar(&projects, "project", nil, "link it to this project id (jiku.projects); repeatable")
+	f.Int64SliceVar(&clients, "client", nil, "link it to this client id (jiku.clients); repeatable")
+	f.StringArrayVar(&topics, "topic", nil, "add this topic (topics); repeatable")
 	return cmd
+}
+
+// addRelations writes --project, --client and --topic into the frontmatter, saying so.
+func addRelations(content []byte, clients, projects []int64, topics []string) ([]byte, error) {
+	out, changed, err := frontmatter.Add(content, frontmatter.Additions{Clients: clients,
+		Projects: projects, Topics: topics})
+	if err != nil {
+		return nil, err
+	}
+	if changed {
+		progressf("frontmatter completed with what --project, --client and --topic added; the " +
+			"file itself is unchanged\n")
+	}
+	return out, nil
+}
+
+// newError explains the two refusals of a creation whose fix is not in the code: a module that
+// predates placement asked to place, and a restricted document from somebody who may not.
+func newError(err error, placed bool, content []byte) error {
+	if placed && jiku.IsCode(err, docs.CodeInvalidFields) {
+		return knownCause{err, "this module may predate contract 1.3.0, which files a document " +
+			"by itself: pass --folder and --name"}
+	}
+	return restrictedError(err, content)
+}
+
+// restrictedHint is what a person or an agent is told when restricted is refused.
+const restrictedHint = "only an admin can mark a document «restricted» or lift it. Remove " +
+	"`visibility: restricted` from the frontmatter (or ask an admin), and save again."
+
+// restrictedError is a permission_denied on a write whose content declares restricted, told as
+// what it is rather than as a folder permission.
+func restrictedError(err error, content []byte) error {
+	if jiku.IsCode(err, docs.CodePermissionDenied) && frontmatter.Visibility(content) == docs.VisibilityRestricted {
+		return knownCause{err, restrictedHint}
+	}
+	return err
+}
+
+// knownCause is a failure whose cause the command knows better than the code alone says. Its
+// hint replaces docs.Hint's generic one.
+type knownCause struct {
+	error
+	hint string
+}
+
+func (k knownCause) Error() string { return k.error.Error() + "\n  " + k.hint }
+
+func (k knownCause) Unwrap() error { return k.error }
+
+// folderResolver is what resolveFolderID needs: a *docs.Client, or a test's fake.
+type folderResolver interface {
+	ResolveFolder(ctx context.Context, ref string) (*docs.Folder, error)
+	Iterate(ctx context.Context, resource string, q jiku.List) *jiku.Iterator
+}
+
+// resolveFolderID turns a folder's path or id into its id.
+//
+// From contract 1.3.0 folders.* answer only admins and services, and a person is refused. The
+// documents still carry their folderId, so a person finds a folder through a document filed in
+// it — and an id is taken as it is, for the module to judge.
+func resolveFolderID(ctx context.Context, d folderResolver, ref string) (string, error) {
+	f, err := d.ResolveFolder(ctx, ref)
+	if err == nil {
+		return f.ID, nil
+	}
+	if !foldersRefused(err) {
+		return "", err
+	}
+	if up := strings.ToUpper(strings.TrimSpace(ref)); docs.ValidID(up) {
+		return up, nil
+	}
+	dir := strings.TrimSuffix(ref, "/") + "/"
+	it := d.Iterate(ctx, "documents", jiku.List{Filter: jiku.F{"pathPrefix": dir},
+		Fields: []string{"id", "path", "folderId"}})
+	for it.Next() {
+		var doc docs.Document
+		if err := it.Item().Into(&doc); err != nil {
+			return "", err
+		}
+		if strings.EqualFold(path.Dir(doc.Path)+"/", dir) && doc.FolderID != "" {
+			return doc.FolderID, nil
+		}
+	}
+	if err := it.Err(); err != nil {
+		return "", err
+	}
+	return "", fmt.Errorf("%w: no document you can read is filed in %s, and folders are listed only to "+
+		"admins on this module. Leave --folder out and let the module file it by its relations",
+		docs.ErrNotFound, dir)
+}
+
+// foldersRefused is the module refusing folders.* to a person, as it does from contract 1.3.0.
+func foldersRefused(err error) bool {
+	return jiku.IsCode(err, docs.CodePermissionDenied) || jiku.IsCode(err, docs.CodeCallerNotAuthorized)
 }
 
 // ---- mv, rm, restore, history --------------------------------------------
@@ -860,7 +1072,11 @@ func newDocsMvCmd() *cobra.Command {
   jiku docs mv /infra/a.md /infra/servidores/b.md      # into a folder, renamed
   jiku docs mv /infra/a.md b.md                        # renamed in place
 
-A destination ending in .md is a new path; anything else is a folder.`,
+A destination ending in .md is a new path; anything else is a folder.
+
+Moving changes where the file is kept — what ` + "`jiku docs sync`" + ` mirrors and ` + "`ls`" + ` shows — and
+nothing about who may read it: that is the document's visibility. To say what a document is
+about, use ` + "`jiku docs relate`" + `.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signalContext()
@@ -878,11 +1094,11 @@ A destination ending in .md is a new path; anything else is a folder.`,
 					opts.FileName, folderRef = file, dir
 				}
 				if folderRef != "" {
-					f, err := d.ResolveFolder(ctx, folderRef)
+					fid, err := resolveFolderID(ctx, d, folderRef)
 					if err != nil {
 						return err
 					}
-					opts.FolderID = f.ID
+					opts.FolderID = fid
 				}
 				res, err := d.Move(ctx, id, opts)
 				if err != nil {
@@ -954,6 +1170,11 @@ printed on stderr and the command exits 5. Pick one of them, or see ` + "`jiku d
 					return err
 				}
 				res, err := d.Restore(ctx, id, from, base)
+				if jiku.IsCode(err, docs.CodePermissionDenied) {
+					return knownCause{err, fmt.Sprintf("only an admin can mark a document «restricted» "+
+						"or lift it, and restoring version %d would do one or the other: check its "+
+						"visibility with `jiku docs get %s --version %d`", from, id, from)}
+				}
 				if err != nil {
 					return err
 				}
@@ -975,7 +1196,7 @@ func newDocsHistoryCmd() *cobra.Command {
 		Use:   "history <document>",
 		Short: "List a document's versions, newest first",
 		Long: `Lists the versions the module keeps, newest first, with their kind (create, update,
-restore) and whether they are protected. A last line on stderr says how many were compacted.
+restore), their author — by name, when the module records it — and whether they are protected. A last line on stderr says how many were compacted.
 
 The module compacts old history: after a day it keeps the last version of each editing session
 (one author, one via, no pause of 30 minutes), after 30 days the last of each day. Protected
@@ -1029,9 +1250,10 @@ type historyRow struct {
 	Kind      docs.VersionKind `json:"kind"`
 	Protected string           `json:"protected"`
 	CreatedAt *time.Time       `json:"createdAt,omitempty"`
-	Author    string           `json:"author"`
-	Via       docs.Via         `json:"via"`
-	Message   string           `json:"message"`
+	// Author is the author's name, or their id from a module that predates names.
+	Author  string   `json:"author"`
+	Via     docs.Via `json:"via"`
+	Message string   `json:"message"`
 }
 
 // historyView is what `history` emits: the versions as the module described them, or, for a
@@ -1049,8 +1271,12 @@ func historyView(versions []docs.Version) any {
 		if v.Protected {
 			mark = "*"
 		}
+		author := v.AuthorName
+		if author == "" {
+			author = v.Author
+		}
 		rows = append(rows, historyRow{Version: v.Version, Kind: v.Kind, Protected: mark,
-			CreatedAt: v.CreatedAt, Author: v.Author, Via: v.Via, Message: v.Message})
+			CreatedAt: v.CreatedAt, Author: author, Via: v.Via, Message: v.Message})
 	}
 	return rows
 }
@@ -1119,8 +1345,9 @@ func newDocsUnlockCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "unlock <document>",
 		Short: "Release the edit lock",
-		Long: `Releases the lock held by --session. --force releases somebody else's, which needs
-manage on the folder: use it only for an abandoned lock.`,
+		Long: `Releases the lock held by --session. --force releases somebody else's, which needs an
+admin (manage on the folder, on a module before contract 1.3.0): use it only for an abandoned
+lock.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signalContext()
@@ -1139,7 +1366,7 @@ manage on the folder: use it only for an abandoned lock.`,
 		},
 	}
 	cmd.Flags().StringVar(&session, "session", "", "the session holding the lock (required)")
-	cmd.Flags().BoolVar(&force, "force", false, "release another session's lock (needs manage)")
+	cmd.Flags().BoolVar(&force, "force", false, "release another session's lock (needs an admin)")
 	_ = cmd.MarkFlagRequired("session")
 	return cmd
 }

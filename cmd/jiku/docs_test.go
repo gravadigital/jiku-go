@@ -66,7 +66,7 @@ func TestParseExpiry(t *testing.T) {
 
 func TestDocsErrorAddsTheHint(t *testing.T) {
 	err := docsError(&jiku.Error{Code: docs.CodeSharingBlocked})
-	if !strings.Contains(err.Error(), "forbids shared links") || !jiku.IsCode(err, docs.CodeSharingBlocked) {
+	if !strings.Contains(err.Error(), "takes no shared links") || !jiku.IsCode(err, docs.CodeSharingBlocked) {
 		t.Fatalf("%v", err)
 	}
 }
