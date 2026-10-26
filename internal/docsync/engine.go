@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gravadigital/jiku-go"
+	"github.com/gravadigital/jiku-go/internal/frontmatter"
 	"github.com/gravadigital/jiku-go/modules"
 	"github.com/gravadigital/jiku-go/modules/docs"
 )
@@ -172,9 +173,12 @@ type Engine struct {
 	watcher Watcher
 
 	// folders are the readable folders by normalized path, refreshed at every full
-	// reconciliation; new local files need their folder's id and permission.
+	// reconciliation; new local files need their folder's id. A module that lists folders only
+	// to admins (contract 1.3.0) leaves them to be learned from the documents' paths.
 	folders map[string]RemoteFolder
-	// permissions are the same folders' permissions by id.
+	// permissions are the permissions folders.list stated, by folder id. Only a module older
+	// than contract 1.3.0 states "read", the one that makes files read-only on disk: from 1.3.0
+	// an internal person writes everything they can read, and folders.list refuses them.
 	permissions map[string]string
 	// warned keeps one-off warnings from repeating every time a file is touched.
 	warned map[string]bool
@@ -444,8 +448,29 @@ func folderKey(p string) string {
 	return strings.ToLower(strings.TrimSuffix(p, "/"))
 }
 
-// readOnly reports whether a folder grants only read.
+// readOnly reports whether the module said the folder grants only read. A folder it said
+// nothing about is writable: the module refuses what is not, and that is reported per file.
 func (e *Engine) readOnly(folderID string) bool { return e.permissions[folderID] == "read" }
+
+// learnFromDocument records the folder a listed document is filed in, without a permission, so
+// a new file beside it can be created where folders.list is refused. What folders.list said
+// wins.
+func (e *Engine) learnFromDocument(d RemoteDoc) {
+	if d.FolderID == "" || d.Path == "" {
+		return
+	}
+	dir := path.Dir(d.Path)
+	if _, ok := e.folders[folderKey(dir)]; ok {
+		return
+	}
+	e.folders[folderKey(dir)] = RemoteFolder{ID: d.FolderID, Path: strings.TrimSuffix(dir, "/") + "/"}
+}
+
+// foldersRefused is a module that lists folders only to admins and services, as from contract
+// 1.3.0 — not a failure of the sync.
+func foldersRefused(err error) bool {
+	return jiku.IsCode(err, docs.CodePermissionDenied) || jiku.IsCode(err, docs.CodeCallerNotAuthorized)
+}
 
 // learnFolder records a folder's path and permission.
 func (e *Engine) learnFolder(f RemoteFolder) {
@@ -822,6 +847,7 @@ func (e *Engine) fullReconcile(ctx context.Context, r Remote) error {
 		}
 		for _, d := range docs {
 			remote[d.ID] = d
+			e.learnFromDocument(d)
 		}
 	}
 
@@ -854,7 +880,9 @@ func (e *Engine) fullReconcile(ctx context.Context, r Remote) error {
 }
 
 // refreshFolders reloads the readable folders and the person's permission on each, which decide
-// where new files may go and which files are read-only on disk.
+// where new files may go and, on a module older than contract 1.3.0, which files are read-only
+// on disk. A module that refuses folders.list to the person leaves both empty: the documents'
+// paths fill in the folders, and nothing is read-only.
 func (e *Engine) refreshFolders(ctx context.Context, r Remote) error {
 	prefixes := e.cfg.Only
 	if len(prefixes) == 0 {
@@ -863,6 +891,14 @@ func (e *Engine) refreshFolders(ctx context.Context, r Remote) error {
 	e.folders, e.permissions = map[string]RemoteFolder{}, map[string]string{}
 	for _, prefix := range prefixes {
 		fs, err := r.Folders(ctx, prefix)
+		if foldersRefused(err) {
+			if !e.warned["folders-refused"] {
+				e.warned["folders-refused"] = true
+				e.logf("info", "", "the module lists folders only to admins: every document you "+
+					"can read is writable, and new files go into folders that already hold one")
+			}
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -1296,7 +1332,7 @@ func (e *Engine) localChanged(ctx context.Context, r Remote, local string) error
 		e.noLongerReadable(*rec, "no longer readable")
 		return nil
 	}
-	if reason, ok := refusal(err); ok {
+	if reason, ok := refusal(err, content); ok {
 		e.rejected("refused:"+rec.ID+sum, p, reason, "not uploaded: %v", firstLine(err))
 		return nil
 	}
@@ -1305,10 +1341,13 @@ func (e *Engine) localChanged(ctx context.Context, r Remote, local string) error
 
 // refusal recognises the module refusing a file for something only the person can fix, and
 // says what in the notification's words.
-func refusal(err error) (string, bool) {
+func refusal(err error, content []byte) (string, bool) {
 	switch {
 	case jiku.IsCode(err, docs.CodeFrontmatterInvalid):
 		return "el frontmatter no es válido", true
+	case jiku.IsCode(err, docs.CodePermissionDenied) &&
+		frontmatter.Visibility(content) == docs.VisibilityRestricted:
+		return "solo un admin puede marcar o quitar «restricted»", true
 	case jiku.IsCode(err, docs.CodePermissionDenied):
 		return "no tenés permiso de escritura", true
 	case jiku.IsCode(err, docs.CodeContentTooLarge):
@@ -1336,10 +1375,11 @@ func (e *Engine) createLocal(ctx context.Context, r Remote, p string, content []
 	}
 	if !ok {
 		e.rejected("nofolder:"+p, p, "la carpeta no existe en Jiku", "not uploaded: the folder %s does not "+
-			"exist in Jiku (or you cannot read it). Folders are created in Jiku, not by the sync", dir)
+			"exist in Jiku, or holds nothing you can read. Folders are created in Jiku, not by the sync: "+
+			"`jiku docs new <file> --project <id>` creates it and Jiku files it by its relations", dir)
 		return nil
 	}
-	if folder.Permission == "read" || folder.Permission == "" {
+	if folder.Permission == "read" {
 		e.rejected("rofolder:"+p, p, "no tenés permiso de escritura en esa carpeta",
 			"not uploaded: you cannot write in %s", dir)
 		return nil
@@ -1364,7 +1404,7 @@ func (e *Engine) createLocal(ctx context.Context, r Remote, p string, content []
 			"the next reconciliation treats this file as a conflict with it")
 		return nil
 	}
-	if reason, ok := refusal(err); ok {
+	if reason, ok := refusal(err, content); ok {
 		_ = e.state.ClearPending(p)
 		e.rejected("refused:"+p+sum, p, reason, "not created: %v", firstLine(err))
 		return nil

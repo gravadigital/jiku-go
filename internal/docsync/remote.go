@@ -21,7 +21,8 @@ type RemoteDoc struct {
 	Deleted bool
 }
 
-// RemoteFolder is a folder with the permission the person has on it.
+// RemoteFolder is a folder with the permission the person has on it — which only a module
+// older than contract 1.3.0 means, and which is empty for a folder learned from a document.
 type RemoteFolder struct {
 	ID         string
 	Path       string
@@ -34,6 +35,8 @@ type Remote interface {
 	// ListDocuments returns every readable document under pathPrefix ("" for all).
 	ListDocuments(ctx context.Context, pathPrefix string) ([]RemoteDoc, error)
 	// Folders returns every readable folder under pathPrefix, with the effective permission.
+	// A module with contract 1.3.0 refuses it to a person (permission_denied), and lists to
+	// admins and services only; the engine then learns folders from the documents' paths.
 	Folders(ctx context.Context, pathPrefix string) ([]RemoteFolder, error)
 	// Get returns a document's current metadata and content. A deleted document comes back too,
 	// with Deleted set, as the module answers it.

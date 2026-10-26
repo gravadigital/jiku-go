@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -34,8 +35,10 @@ type fakeRemote struct {
 	notes     chan docs.Notification
 	lockedBy  map[string]bool
 	failNext  map[string]error // method -> one failure
-	updates   []string         // "id@base"
-	creates   []string         // "id path"
+	// foldersErr is every folders.list refused, as a module with contract 1.3.0 refuses a person.
+	foldersErr error
+	updates    []string // "id@base"
+	creates    []string // "id path"
 }
 
 func newRemote() *fakeRemote {
@@ -82,6 +85,9 @@ func (f *fakeRemote) ListDocuments(_ context.Context, prefix string) ([]RemoteDo
 }
 
 func (f *fakeRemote) Folders(_ context.Context, prefix string) ([]RemoteFolder, error) {
+	if f.foldersErr != nil {
+		return nil, f.foldersErr
+	}
 	var out []RemoteFolder
 	for _, fo := range f.folders {
 		if strings.HasPrefix(fo.Path, prefix) {
@@ -111,7 +117,10 @@ func (f *fakeRemote) Update(_ context.Context, id string, base int, content []by
 	if err := f.fail("update"); err != nil {
 		return 0, err
 	}
-	d := f.docs[id]
+	d, ok := f.docs[id]
+	if !ok {
+		return 0, &jiku.Error{Code: docs.CodeDocumentNotFound}
+	}
 	if f.lockedBy[id] {
 		e := &jiku.Error{Code: docs.CodeDocumentLocked, Details: &jiku.ErrorDetails{}}
 		_ = json.Unmarshal([]byte(`{"holder":"99","via":"agent","expiresAt":"2026-10-24T13:00:00Z"}`), e.Details)
@@ -133,6 +142,11 @@ func (f *fakeRemote) Create(_ context.Context, id, folderID, name string, conten
 	for _, fo := range f.folders {
 		if fo.ID == folderID {
 			dir = strings.TrimSuffix(fo.Path, "/")
+		}
+	}
+	for _, d := range f.docs {
+		if d.FolderID == folderID {
+			dir = path.Dir(d.Path)
 		}
 	}
 	p := dir + "/" + name
