@@ -1,6 +1,12 @@
-// Package docs is a client for Jiku's optional documentation module: markdown documents in
-// folders with per-folder permissions, versions, edit locks, attachments, shared links and live
+// Package docs is a client for Jiku's optional documentation module: markdown documents with
+// relations to clients and projects, versions, edit locks, attachments, shared links and live
 // notifications.
+//
+// Who may read a document is decided by its visibility and the caller's class, not by its
+// folder (contract 1.3.0): see VisibilityRestricted. Folders remain as the way the module files
+// documents, which the sync daemon mirrors; New places a document by its relations when no
+// folder is given. A module that predates 1.3.0 still decides by folder, and every field this
+// package added for 1.3.0 is simply empty against it.
 //
 // It sits on an ordinary *jiku.Client — one connection, one identity, both core and the module
 // — and reaches the module on the plane the module registry names, never on a service name

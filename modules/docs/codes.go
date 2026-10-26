@@ -25,7 +25,10 @@ const (
 	CodeDocumentNotFound   = "document_not_found"
 	CodeFolderNotFound     = "folder_not_found"
 	CodeAttachmentNotFound = "attachment_not_found"
-	// CodePermissionDenied is something the caller can read and may not write or manage.
+	// CodePermissionDenied is something the caller can read and may not change: setting or
+	// lifting VisibilityRestricted without being an admin, folders.* without being an admin or
+	// a service, or any write by an external user. Before contract 1.3.0 it was a folder
+	// granting less than write, or manage.
 	CodePermissionDenied = "permission_denied"
 	// CodeVersionConflict is a baseVersion that is no longer current. errorDetails carries
 	// currentVersion; see CurrentVersion.
@@ -78,7 +81,8 @@ const (
 	// CodeShareNotFound is a shared link that does not exist, was revoked, expired, or whose
 	// document or folder no longer allows it — deliberately indistinguishable.
 	CodeShareNotFound = "share_not_found"
-	// CodeSharingBlocked is a folder, or an ancestor, that forbids shared links.
+	// CodeSharingBlocked is a document that takes no shared links: a restricted one, or, before
+	// contract 1.3.0, one in a folder that forbids them.
 	CodeSharingBlocked = "sharing_blocked"
 	// CodeShareExpiryInvalid is an expiry in the past or beyond the module's maximum.
 	CodeShareExpiryInvalid = "share_expiry_invalid"
@@ -188,6 +192,9 @@ func LockHolder(err error) (*Lock, bool) {
 		s, _ := v.(string)
 		l.Via = Via(s)
 	}
+	if v, ok := detail(err, "holderName"); ok {
+		l.HolderName, _ = v.(string)
+	}
 	if v, ok := detail(err, "sessionId"); ok {
 		l.SessionID, _ = v.(string)
 	}
@@ -225,7 +232,7 @@ func Hint(err error) string {
 	case CodeDocumentLocked:
 		if l, ok := LockHolder(err); ok {
 			return fmt.Sprintf("%s is editing it (via %s) until %s. Wait, work read-only, or ask "+
-				"them to release it.", l.Holder, l.Via, l.ExpiresAt.Format(time.RFC3339))
+				"them to release it.", l.Who(), l.Via, l.ExpiresAt.Format(time.RFC3339))
 		}
 		return "another session holds the lock. Wait for it to expire or be released."
 	case CodeLockNotHeld:
@@ -245,10 +252,13 @@ func Hint(err error) string {
 	case CodeUpstreamUnavailable:
 		return "the module could not reach core. Retry in a moment."
 	case CodePermissionDenied:
-		return "you can read this but not change it: the folder grants you less than write (or " +
-			"manage, for shares and ACLs)."
+		return "you can read this but not make this change. Only an admin can mark a document " +
+			"«restricted» or lift it (`visibility` in the frontmatter, on a save, a creation or a " +
+			"restore), and only admins manage folders. On a module before contract 1.3.0, the " +
+			"folder grants you less than write (or manage, for shares and ACLs)."
 	case CodeSharingBlocked:
-		return "this folder, or one above it, forbids shared links."
+		return "this document takes no shared links: it is «restricted» (or, on a module before " +
+			"contract 1.3.0, its folder forbids them)."
 	case CodeSemanticSearchNotConfigured:
 		return "only --mode text is available on this deployment."
 	case CodeInvalidFields:

@@ -125,9 +125,16 @@ func (c *Client) GetContent(ctx context.Context, ref string, opts GetOptions) (*
 type NewDocument struct {
 	// ID is the new document's id. Leave it empty to have one generated — and when retrying
 	// after a timeout, pass the same one again: that is what makes the retry safe.
-	ID       string
+	ID string
+	// FolderID is where the file goes. Leave it empty to have the module place the document
+	// from the relations in its frontmatter — /clientes/<client>/<project>/ with a project,
+	// /clientes/<client>/general/ with a client alone, /general/ with neither — creating the
+	// folders it needs. Where a document is filed decides nothing about who may read it, and
+	// the module never moves it when its relations change later. A module older than contract
+	// 1.3.0 requires it.
 	FolderID string
-	// FileName must end in .md.
+	// FileName must end in .md. Leave it empty to have the module derive one from the title,
+	// made unique in the folder (-2, -3, ...). A module older than 1.3.0 requires it.
 	FileName string
 	Content  []byte
 	Message  string
@@ -135,6 +142,7 @@ type NewDocument struct {
 
 // New creates a document with documents.new. The id is generated when none is given, the
 // checksum is computed, and content above the inline limit goes through a presigned upload.
+// WriteResult.Path says where the module filed it.
 func (c *Client) New(ctx context.Context, d NewDocument) (*WriteResult, error) {
 	if d.ID == "" {
 		d.ID = NewID()
@@ -142,10 +150,16 @@ func (c *Client) New(ctx context.Context, d NewDocument) (*WriteResult, error) {
 	if err := requireID("document", d.ID); err != nil {
 		return nil, err
 	}
-	if err := requireID("folder", d.FolderID); err != nil {
-		return nil, err
+	base := map[string]any{"id": d.ID, "via": c.via}
+	if d.FolderID != "" {
+		if err := requireID("folder", d.FolderID); err != nil {
+			return nil, err
+		}
+		base["folderId"] = d.FolderID
 	}
-	base := map[string]any{"id": d.ID, "folderId": d.FolderID, "fileName": d.FileName, "via": c.via}
+	if d.FileName != "" {
+		base["fileName"] = d.FileName
+	}
 	if d.Message != "" {
 		base["message"] = d.Message
 	}
@@ -448,7 +462,8 @@ func (c *Client) Lock(ctx context.Context, id string, opts LockOptions) (*LockRe
 	return res, nil
 }
 
-// Unlock releases a lock. force releases another session's, which needs manage.
+// Unlock releases a lock. force releases another session's, which needs an admin (manage on
+// the folder, before contract 1.3.0).
 func (c *Client) Unlock(ctx context.Context, id, sessionID string, force bool) error {
 	if err := requireID("document", id); err != nil {
 		return err
